@@ -649,6 +649,7 @@ if [[ "$MODE" = "interactive" ]]; then
     fi
   }
   bind -x '"\t": __ai_tab' 2>/dev/null || true
+  bind 'set enable-bracketed-paste on' 2>/dev/null || true
 
   echo "AI-OS  •  $MODEL  •  /help pre príkazy  •  Ctrl+C na ukončenie"
   echo "────────────────────────────────────────────────────────────────"
@@ -991,32 +992,35 @@ WSDSEOF
           CONV="$local_compressed"
           echo "Konverzácia komprimovaná. Správy: $(jq 'length' <<< "$CONV")"
           ;;
-        /plan*)
-          local_plan_arg="${INPUT#/plan}"
-          local_plan_arg="${local_plan_arg# }"
-          if [[ -n "$local_plan_arg" ]]; then
-            # Inline: /plan <text> — send immediately
-            INPUT="$local_plan_arg"
+        /plan)
+          # Multiline mode: collect lines until lone '.'
+          printf 'Plánovací mód (ukonči riadkom obsahujúcim len .)\n'
+          local_plan_buf=""
+          while IFS= read -er local_plan_line; do
+            # Defensive strip of bracketed-paste markers
+            local_plan_line="${local_plan_line#$'\e[200~'}"
+            local_plan_line="${local_plan_line%$'\e[201~'}"
+            [[ "$local_plan_line" = "." ]] && break
+            local_plan_buf="${local_plan_buf}${local_plan_line}
+"
+          done
+          local_plan_buf="${local_plan_buf%
+}"
+          if [[ -n "$local_plan_buf" ]]; then
+            INPUT="$local_plan_buf"
             PLAN_MODE=true
             local_skip_api=false
           else
-            # Multiline mode: collect lines until lone '.'
-            printf 'Plánovací mód (ukonči riadkom obsahujúcim len .)\n'
-            local_plan_buf=""
-            while IFS= read -er local_plan_line; do
-              [[ "$local_plan_line" = "." ]] && break
-              local_plan_buf="${local_plan_buf}${local_plan_line}
-"
-            done
-            local_plan_buf="${local_plan_buf%
-}"
-            if [[ -n "$local_plan_buf" ]]; then
-              INPUT="$local_plan_buf"
-              PLAN_MODE=true
-              local_skip_api=false
-            else
-              echo "Plánovací mód zrušený."
-            fi
+            echo "Plánovací mód zrušený."
+          fi
+          ;;
+        "/plan "*)
+          # Inline: /plan <text> — send immediately
+          local_plan_arg="${INPUT#/plan }"
+          if [[ -n "$local_plan_arg" ]]; then
+            INPUT="$local_plan_arg"
+            PLAN_MODE=true
+            local_skip_api=false
           fi
           ;;
         /batch*)

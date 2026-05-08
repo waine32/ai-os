@@ -370,12 +370,91 @@ MOCKCURL
 
   rm -f /tmp/curl_payload.json
 
-  run bash -c "printf '/plan\nwrite a scraper\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  run bash -c "printf '/plan\nwrite a scraper\n.\nexit\n' | '$AI_SCRIPT' flash --interactive"
   [ "$status" -eq 0 ]
   [ -f /tmp/curl_payload.json ]
 
   local payload=$(< /tmp/curl_payload.json)
   [[ "$payload" == *"step-by-step plan"* ]]
+}
+
+@test "/plan with no args enters multiline mode and aggregates lines until lone dot" {
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then
+    echo "$arg" > /tmp/curl_payload.json
+    found_d=0
+  fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+echo '{"choices":[{"message":{"content":"ok"}}]}'
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+  rm -f /tmp/curl_payload.json
+
+  run bash -c "printf '/plan\nline one\nline two\n.\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  local payload=$(< /tmp/curl_payload.json)
+  [[ "$payload" == *"line one"* ]]
+  [[ "$payload" == *"line two"* ]]
+  [[ "$payload" == *"step-by-step plan"* ]]
+}
+
+@test "/plan followed by dots is unknown command, not inline plan" {
+  run bash -c "printf '/plan....\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Neznámy príkaz"* ]]
+}
+
+@test "/plan with inline text sends immediately" {
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then
+    echo "$arg" > /tmp/curl_payload.json
+    found_d=0
+  fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+echo '{"choices":[{"message":{"content":"ok"}}]}'
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+  rm -f /tmp/curl_payload.json
+
+  run bash -c "printf '/plan write a scraper\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  local payload=$(< /tmp/curl_payload.json)
+  [[ "$payload" == *"write a scraper"* ]]
+  [[ "$payload" == *"step-by-step plan"* ]]
+}
+
+@test "/plan multiline tolerates lines starting with dots if not lone dot" {
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then
+    echo "$arg" > /tmp/curl_payload.json
+    found_d=0
+  fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+echo '{"choices":[{"message":{"content":"ok"}}]}'
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+  rm -f /tmp/curl_payload.json
+
+  run bash -c "printf '/plan\n....\nbody text\n.\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  local payload=$(< /tmp/curl_payload.json)
+  [[ "$payload" == *"...."* ]]
+  [[ "$payload" == *"body text"* ]]
 }
 
 @test "/batch with a temp file" {

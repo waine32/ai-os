@@ -670,6 +670,7 @@ if [[ "$MODE" = "interactive" ]]; then
       continue
     fi
 
+    local_skip_api=true
     if [[ "$INPUT" = /* ]]; then
       case "$INPUT" in
         /status)
@@ -990,9 +991,31 @@ WSDSEOF
           CONV="$local_compressed"
           echo "Konverzácia komprimovaná. Správy: $(jq 'length' <<< "$CONV")"
           ;;
-        /plan)
-          PLAN_MODE=true
-          echo "Plánovací mód: ďalšia správa bude odoslaná s inštrukciou na vypracovanie plánu."
+        /plan*)
+          local_plan_arg="${INPUT#/plan}"
+          local_plan_arg="${local_plan_arg# }"
+          if [[ -n "$local_plan_arg" ]]; then
+            # Inline: /plan <text> — send immediately
+            INPUT="$local_plan_arg"
+            PLAN_MODE=true
+            local_skip_api=false
+          else
+            # Multiline mode: collect lines until lone '.'
+            printf 'Plánovací mód (ukonči riadkom obsahujúcim len .)\n'
+            local_plan_buf=""
+            while IFS= read -er local_plan_line; do
+              [[ "$local_plan_line" = "." ]] && break
+              local_plan_buf+="${local_plan_line}"$'\n'
+            done
+            local_plan_buf="${local_plan_buf%$'\n'}"
+            if [[ -n "$local_plan_buf" ]]; then
+              INPUT="$local_plan_buf"
+              PLAN_MODE=true
+              local_skip_api=false
+            else
+              echo "Plánovací mód zrušený."
+            fi
+          fi
           ;;
         /batch*)
           local_file="${INPUT#/batch}"
@@ -1074,7 +1097,7 @@ WSDSEOF
           ;;
       esac
       warp_seq "D;0"
-      continue
+      [[ "$local_skip_api" == true ]] && continue
     fi
 
     # Apply plan mode prefix if set

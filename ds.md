@@ -23,14 +23,18 @@ AI-OS is a minimal deterministic bash CLI router that dispatches prompts to Deep
 
 AI-OS uses a Claude Code–style layered context system. Files are loaded at startup and assembled into the system prompt in this order:
 
-| File | Path | Role |
-|------|------|------|
-| `instructions.md` | `~/.ai-os/instructions.md` | Base behaviour, language, tone — replaces hardcoded defaults |
-| `memory.md` | `~/.ai-os/memory.md` | Accumulated facts, user preferences, project info |
-| `context.md` | `~/.ai-os/context.md` | Current active context (legacy: `context/global.md`) |
-| `ds.md` | `./ds.md` (CWD walk) | Project-level instructions — discovered by walking up from CWD |
+| Layer | File | Path | Role |
+|-------|------|------|------|
+| 1 | `instructions.md` | `~/.ai-os/instructions.md` | Base behaviour, language, tone — replaces hardcoded defaults |
+| 2 | `memory.md` | `~/.ai-os/memory.md` | Accumulated facts, user preferences, project info |
+| 3 | `context.md` | `~/.ai-os/context.md` | Current active context (legacy: `context/global.md`) |
+| 4 | `ds.md` | `<workspace>/ds.md` | Workspace meta-guide — instructions on how to use workspace memory files |
+| 5 | `instructions.md` | `<workspace>/memory/instructions.md` | Workspace-level behaviour rules |
+| 6 | `memory.md` | `<workspace>/memory/memory.md` | Workspace-level accumulated facts |
+| 7 | `context.md` | `<workspace>/memory/context.md` | Workspace-level active context |
+| 8 | `ds.md` | `./ds.md` (CWD walk) | Project-level instructions — discovered by walking up from CWD |
 
-`instructions.md` and `memory.md` are auto-created with defaults on first run if missing. `ds.md` is optional and project-specific. The `/memory` slash command shows all loaded context files.
+Global files (1–3) are auto-created with defaults on first run if missing. Workspace files (4–7) are created by `/workspace`. Project `ds.md` (8) is optional and project-specific. The `/memory` slash command shows all loaded context files.
 
 ## Output streaming
 
@@ -59,12 +63,32 @@ Lets Warp draw block boundaries and enables click-to-copy on AI responses. No-op
 
 Both hit `https://api.deepseek.com/chat/completions`.
 
+## Model tool support
+
+In interactive mode, both models have access to the `run_shell` tool:
+
+- **Flash** — handled by `run_interactive_flash()` (blocking, non-streaming). When the model calls `run_shell`, the user is shown the command and asked to confirm before execution.
+- **Pro** — handled by `run_agentic()`. Has both `delegate_to_flash` (submodel delegation) and `run_shell`. Same confirmation prompt before execution.
+
+Security: commands are always shown to the user with a `[y/N]` prompt. Default is `N` (no execution).
+
+## Shell passthrough
+
+Any input starting with `!` is executed directly as a shell command — the model is bypassed entirely and no tokens are consumed.
+
+```
+!pwd          → prints current directory
+!ls -la       → lists files
+!git status   → any shell command
+```
+
 ## Interactive mode slash commands
 
-Entered as `/command` in the interactive prompt. No API call is made; handled locally.
+Entered as `/command` in the interactive prompt. No API call is made; handled locally. Tab completion cycles through slash commands; `/project ` (with space) cycles through its sub-commands.
 
 | Command | Description |
 |---------|-------------|
+| `!<cmd>` | Execute shell command directly — model bypassed, no tokens used |
 | `/status` | Show model name, temperature, message count, estimated token count, last prompt/completion token counts, memory file size, and session delegation count |
 | `/reset` | Clear conversation history (does not affect memory or session files) |
 | `/compact` | Compress conversation history while preserving context |
@@ -72,9 +96,14 @@ Entered as `/command` in the interactive prompt. No API call is made; handled lo
 | `/batch <file>` | Run prompts from file sequentially (one per line, ignores comments with `#`) |
 | `/save [name]` | Save current conversation to a named session |
 | `/load [name]` | Load a previously saved named session |
-| `/model [flash\|pro]` | Switch between models (flash for speed, pro for thoroughness). Pro automatically delegates subtasks to Flash via tool calls. |
+| `/model [flash\|pro]` | Switch between models. Pro delegates subtasks to Flash and can run shell commands via `run_shell` tool. |
 | `/memory` | Display contents of loaded context files (instructions, memory, context) |
-| `/project [set <path>\|clear]` | Show, set, or clear the active project for `ds.md` fallback loading |
+| `/workspace [path]` | Set the Workspace folder. Creates `ds.md` (meta-guide) and `memory/` with `instructions.md`, `memory.md`, `context.md`. Offers interactive editing. |
+| `/project` | Show current project and workspace |
+| `/project new [name]` | Create a new project in the workspace with `ds.md` and `context.md`. Sets it as active. |
+| `/project list` | List all project directories in the workspace (▶ marks active project) |
+| `/project set <path>` | Set active project by path (must be within `$HOME` and contain `ds.md`) |
+| `/project clear` | Clear active project (requires confirmation to prevent accidental removal) |
 | `/clear` | Clear the terminal screen |
 | `/help` | List all slash commands |
 | `/exit` | Exit the interactive session |
@@ -96,12 +125,19 @@ ds.md                                   # project-level context (this file)
 ~/.ai-os/instructions.md                # user-wide behaviour instructions (auto-created on first run)
 ~/.ai-os/memory.md                      # accumulated memory/facts (auto-created on first run)
 ~/.ai-os/context.md                     # active context (optional; legacy: context/global.md)
+~/.ai-os/workspace                      # path to active workspace (set by /workspace command)
+~/.ai-os/current-project                # path to active project (set by /project new|set)
 ~/.ai-os/sessions/history.json          # session mode history (JSON array of objects)
 ~/.ai-os/sessions/interactive_history   # readline history for interactive mode (up-arrow recall)
 ~/.ai-os/sessions/named/<name>.json     # named sessions saved with /save
 ~/.ai-os/tmp/last_output.json           # last raw API response (for debugging; 600 perms)
-~/.ai-os/tmp/last_stream.txt            # last streamed response content (assembled tokens)
-~/.ai-os/current-project                # last known git project root (written by chpwd hook)
+~/.ai-os/tmp/last_stream.txt            # last streamed/blocking response content
+<workspace>/ds.md                       # workspace meta-guide (auto-created by /workspace)
+<workspace>/memory/instructions.md      # workspace behaviour rules
+<workspace>/memory/memory.md            # workspace accumulated facts
+<workspace>/memory/context.md           # workspace active context
+<workspace>/<project>/ds.md             # project description (created by /project new)
+<workspace>/<project>/context.md        # project active context (created by /project new)
 ```
 
 ## Session history compression

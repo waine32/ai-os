@@ -45,6 +45,40 @@ HIST_FILE="$HOME/.ai-os/sessions/history.json"
 AI_TMP="$HOME/.ai-os/tmp"
 mkdir -p "$AI_TMP"
 
+FLASH_TOOLS=$(jq -cn '[{
+  "type": "function",
+  "function": {
+    "name": "delegate_to_flash",
+    "description": "Delegate a self-contained subtask to the fast Flash model. Use for straightforward lookups, text formatting, drafting, or factual retrieval that does not require deep reasoning. Flash has no conversation history — include all needed context in the prompt.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "prompt": {"type":"string","description":"Complete, self-contained prompt for Flash. Include all context."},
+        "reason": {"type":"string","description":"Why this subtask is delegated to Flash."}
+      },
+      "required": ["prompt"]
+    }
+  }
+}]')
+
+SHELL_TOOL=$(jq -cn '[{
+  "type": "function",
+  "function": {
+    "name": "run_shell",
+    "description": "Execute a shell command on the local machine. Use for file operations, directory listing, running scripts, or any system task. Always prefer minimal, safe commands.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {"type":"string","description":"Shell command to execute."},
+        "reason":  {"type":"string","description":"Why this command is needed."}
+      },
+      "required": ["command"]
+    }
+  }
+}]')
+
+PRO_TOOLS=$(jq -cn --argjson a "$FLASH_TOOLS" --argjson b "$SHELL_TOOL" '$a + $b')
+
 # ── context file hierarchy ────────────────────────────────────────────────────
 
 # Auto-create default context files on first run
@@ -62,6 +96,25 @@ Always respond in Slovak language.
 
 ## Behavior
 Be concise and direct. Prefer structured output for complex answers.
+
+## Model selection
+
+🟣 Pro — use for:
+- debugging
+- architecture decisions
+- flaky tests
+- async race conditions
+- large refactors
+
+🔵 Flash — use for:
+- CRUD tests
+- boilerplate generation
+- rename/refactor
+- generating mocks
+- formatting
+- repetitive edits
+
+Efficient pattern: analysis (Pro) → implementation (Flash) → final review (Pro)
 EOF
   fi
   if [[ ! -f "$mfile" ]]; then
@@ -76,6 +129,7 @@ EOF
 # Assemble SYSTEM_PROMPT from layered context files (like Claude Code's CLAUDE.md hierarchy)
 _build_system_prompt() {
   local instructions="" memory="" context="" ds_content="" dir
+  local ws_meta="" ws_instr="" ws_mem="" ws_ctx=""
   local -a ds_files
   ds_files=()
 
@@ -90,12 +144,38 @@ _build_system_prompt() {
   # backward compat: fall back to legacy global.md
   [[ -z "$context" && -f ~/.ai-os/context/global.md ]] && context=$(< ~/.ai-os/context/global.md)
 
+  # Workspace context layer (between global context and project ds.md)
+  if [[ -f ~/.ai-os/workspace ]]; then
+    local _ws; _ws=$(< ~/.ai-os/workspace); _ws="${_ws%$'\n'}"
+    if [[ "$_ws" = "$HOME"* ]]; then
+      [[ -f "$_ws/ds.md"                  ]] && ws_meta=$(< "$_ws/ds.md")
+      [[ -f "$_ws/memory/instructions.md" ]] && ws_instr=$(< "$_ws/memory/instructions.md")
+      [[ -f "$_ws/memory/memory.md"       ]] && ws_mem=$(< "$_ws/memory/memory.md")
+      [[ -f "$_ws/memory/context.md"      ]] && ws_ctx=$(< "$_ws/memory/context.md")
+    fi
+  fi
+
   # Walk CWD upward collecting ds.md files (parent-first so CWD is most specific)
   dir="$PWD"
   while [[ "$dir" != "/" ]]; do
     [[ -f "$dir/ds.md" ]] && ds_files=("$dir/ds.md" "${ds_files[@]+"${ds_files[@]}"}")
     dir=$(dirname "$dir")
   done
+  # Fallback: load last known project from chpwd shell hook
+  if [[ -f ~/.ai-os/current-project ]]; then
+    local proj_root
+    proj_root=$(< ~/.ai-os/current-project)
+    proj_root="${proj_root%$'\n'}"
+    if [[ "$proj_root" = "$HOME"* && -f "$proj_root/ds.md" ]]; then
+      local already_loaded=0
+      if [[ ${#ds_files[@]} -gt 0 ]]; then
+        for f in "${ds_files[@]}"; do
+          [[ "$f" = "$proj_root/ds.md" ]] && already_loaded=1 && break
+        done
+      fi
+      [[ "$already_loaded" -eq 0 ]] && ds_files=("$proj_root/ds.md" "${ds_files[@]+"${ds_files[@]}"}")
+    fi
+  fi
   if [[ ${#ds_files[@]} -gt 0 ]]; then
     for f in "${ds_files[@]}"; do
       ds_content+=$'\n\n'"$(< "$f")"
@@ -105,6 +185,10 @@ _build_system_prompt() {
   local prompt="$instructions"
   [[ -n "$memory"     ]] && prompt+=$'\n\n## Memory\n'"$memory"
   [[ -n "$context"    ]] && prompt+=$'\n\n## Context\n'"$context"
+  [[ -n "$ws_meta"    ]] && prompt+=$'\n\n## Workspace\n'"$ws_meta"
+  [[ -n "$ws_instr"   ]] && prompt+=$'\n\n## Workspace Instructions\n'"$ws_instr"
+  [[ -n "$ws_mem"     ]] && prompt+=$'\n\n## Workspace Memory\n'"$ws_mem"
+  [[ -n "$ws_ctx"     ]] && prompt+=$'\n\n## Workspace Context\n'"$ws_ctx"
   [[ -n "$ds_content" ]] && prompt+=$'\n\n## Project\n'"$ds_content"
   echo "$prompt"
 }
@@ -114,6 +198,7 @@ SYSTEM_PROMPT=$(_build_system_prompt)
 
 LAST_PROMPT_TOKENS=0
 LAST_COMPLETION_TOKENS=0
+SESSION_DELEGATIONS=0
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -176,18 +261,28 @@ compress_history() {
 # stream=false (default): returns content via stdout — use with $()
 # stream=true: streams tokens directly to stdout, saves result to $AI_TMP/last_stream.txt — call without $()
 ask() {
-  local messages="$1" stream="${2:-false}"
+  local messages="$1" stream="${2:-false}" tools="${3:-}"
   local all_messages payload
   all_messages=$(jq -n \
     --arg    system "$SYSTEM_PROMPT" \
     --argjson msgs   "$messages" \
     '[{"role":"system","content":$system}] + $msgs')
-  payload=$(jq -n \
-    --arg    model   "$MODEL_NAME" \
-    --argjson msgs   "$all_messages" \
-    --argjson temp   "$TEMPERATURE" \
-    --argjson stream "$stream" \
-    '{"model":$model,"messages":$msgs,"temperature":$temp,"stream":$stream}')
+  if [[ -n "$tools" ]]; then
+    payload=$(jq -n \
+      --arg    model   "$MODEL_NAME" \
+      --argjson msgs   "$all_messages" \
+      --argjson temp   "$TEMPERATURE" \
+      --argjson stream "$stream" \
+      --argjson tools  "$tools" \
+      '{"model":$model,"messages":$msgs,"temperature":$temp,"stream":$stream,"tools":$tools,"tool_choice":"auto"}')
+  else
+    payload=$(jq -n \
+      --arg    model   "$MODEL_NAME" \
+      --argjson msgs   "$all_messages" \
+      --argjson temp   "$TEMPERATURE" \
+      --argjson stream "$stream" \
+      '{"model":$model,"messages":$msgs,"temperature":$temp,"stream":$stream}')
+  fi
 
   if [[ "$stream" == true ]]; then
     local full_response="" is_sse=false raw_buf="" sse_line chunk token
@@ -236,6 +331,163 @@ ask() {
     LAST_COMPLETION_TOKENS=$(jq -r '.usage.completion_tokens // 0' "$AI_TMP/last_output.json")
     jq -r '.choices[0].message.content // empty' "$AI_TMP/last_output.json"
   fi
+}
+
+# Pro→Flash agentic tool-call loop (only called when MODEL=pro)
+run_agentic() {
+  local messages="$1"
+  local max_delegations=5 delegation_count=0
+  local orig_model="$MODEL" orig_model_name="$MODEL_NAME"
+
+  while [[ $delegation_count -le $max_delegations ]]; do
+    printf '[pro...]\n' >&2
+    ask "$messages" false "$PRO_TOOLS" >/dev/null
+    local finish_reason
+    finish_reason=$(jq -r '.choices[0].finish_reason // "stop"' < "$AI_TMP/last_output.json")
+
+    if [[ "$finish_reason" != "tool_calls" ]]; then
+      local final_content
+      final_content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
+      printf '%s\n' "$final_content"
+      printf '%s' "$final_content" > "$AI_TMP/last_stream.txt"
+      SESSION_DELEGATIONS=$((SESSION_DELEGATIONS + delegation_count))
+      return 0
+    fi
+
+    local tool_calls_json assistant_msg
+    tool_calls_json=$(jq -c '.choices[0].message.tool_calls // []' < "$AI_TMP/last_output.json")
+    assistant_msg=$(jq -c '.choices[0].message' < "$AI_TMP/last_output.json")
+    messages=$(jq -n --argjson h "$messages" --argjson m "$assistant_msg" '$h + [$m]')
+
+    local n_tools tool_idx
+    n_tools=$(jq 'length' <<< "$tool_calls_json")
+    for ((tool_idx = 0; tool_idx < n_tools; tool_idx++)); do
+      local call_id func_name func_args_json flash_prompt flash_result flash_reason
+      call_id=$(jq -r ".[$tool_idx].id" <<< "$tool_calls_json")
+      func_name=$(jq -r ".[$tool_idx].function.name" <<< "$tool_calls_json")
+      func_args_json=$(jq -r ".[$tool_idx].function.arguments" <<< "$tool_calls_json")
+
+      if [[ "$func_name" == "delegate_to_flash" ]]; then
+        flash_prompt=$(jq -r '.prompt // empty' <<< "$func_args_json")
+        flash_reason=$(jq -r '.reason // ""' <<< "$func_args_json")
+
+        if [[ -z "$flash_prompt" ]]; then
+          flash_result="Error: delegate_to_flash called with empty prompt"
+        elif [[ ${#flash_prompt} -gt 10000 ]]; then
+          flash_result="Error: delegated prompt too large (max 10000 chars)"
+        else
+          [[ -n "$flash_reason" ]] && printf '[→ flash: %s]\n' "$flash_reason" >&2 \
+                                    || printf '[→ flash]\n' >&2
+          MODEL="flash" MODEL_NAME="deepseek-v4-flash"
+          local flash_messages
+          flash_messages=$(jq -n --arg c "$flash_prompt" '[{"role":"user","content":$c}]')
+          ask "$flash_messages" true
+          flash_result=$(< "$AI_TMP/last_stream.txt")
+          MODEL="$orig_model" MODEL_NAME="$orig_model_name"
+          printf '[← pro]\n' >&2
+          delegation_count=$((delegation_count + 1))
+        fi
+      elif [[ "$func_name" == "run_shell" ]]; then
+        local run_cmd run_reason
+        run_cmd=$(jq -r '.command // empty' <<< "$func_args_json")
+        run_reason=$(jq -r '.reason // ""' <<< "$func_args_json")
+        if [[ -z "$run_cmd" ]]; then
+          flash_result="Error: run_shell called with empty command"
+        else
+          flash_result=$(_exec_shell_tool "$run_cmd" "$run_reason")
+        fi
+      else
+        flash_result="Error: unknown tool '${func_name}'"
+      fi
+
+      messages=$(jq -n \
+        --argjson h "$messages" \
+        --arg id      "$call_id" \
+        --arg content "$flash_result" \
+        '$h + [{"role":"tool","tool_call_id":$id,"content":$content}]')
+    done
+  done
+
+  printf '[pro: concluding...]\n' >&2
+  ask "$messages" false
+  local final_content
+  final_content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
+  printf '%s\n' "$final_content"
+  printf '%s' "$final_content" > "$AI_TMP/last_stream.txt"
+}
+
+# _exec_shell_tool CMD [REASON] — shows command, asks user confirmation, executes
+# Returns command output to stdout; safe default (no) when /dev/tty unavailable.
+_exec_shell_tool() {
+  local _cmd="$1" _reason="${2:-}"
+  [[ -n "$_reason" ]] \
+    && printf '\n[shell] %s  # %s\n' "$_cmd" "$_reason" >&2 \
+    || printf '\n[shell] %s\n' "$_cmd" >&2
+  printf 'Spustiť? [y/N] ' >&2
+  local _ans=""
+  IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
+  if [[ "$_ans" =~ ^[Yy]$ ]]; then
+    bash -c "$_cmd" 2>&1 || printf '[exit %s]\n' "$?"
+  else
+    printf '[zrušené užívateľom]'
+  fi
+}
+
+# run_interactive_flash MESSAGES — blocking tool-call loop for flash interactive mode.
+# Handles run_shell tool calls; prints final content to stdout.
+run_interactive_flash() {
+  local _msgs="$1"
+  local _max_iter=10 _iter=0 _finish _content
+  local _tool_calls _assistant_msg _n_tools _tool_idx
+  local _call_id _func_name _func_args _tool_result _shell_cmd _shell_reason
+
+  while [[ $_iter -lt $_max_iter ]]; do
+    ask "$_msgs" false "$SHELL_TOOL"
+    _finish=$(jq -r '.choices[0].finish_reason // "stop"' < "$AI_TMP/last_output.json")
+
+    if [[ "$_finish" != "tool_calls" ]]; then
+      _content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
+      printf '%s\n' "$_content"
+      printf '%s' "$_content" > "$AI_TMP/last_stream.txt"
+      return 0
+    fi
+
+    _tool_calls=$(jq -c '.choices[0].message.tool_calls // []' < "$AI_TMP/last_output.json")
+    _assistant_msg=$(jq -c '.choices[0].message' < "$AI_TMP/last_output.json")
+    _msgs=$(jq -n --argjson h "$_msgs" --argjson m "$_assistant_msg" '$h + [$m]')
+
+    _n_tools=$(jq 'length' <<< "$_tool_calls")
+    for ((_tool_idx = 0; _tool_idx < _n_tools; _tool_idx++)); do
+      _call_id=$(jq -r ".[$_tool_idx].id" <<< "$_tool_calls")
+      _func_name=$(jq -r ".[$_tool_idx].function.name" <<< "$_tool_calls")
+      _func_args=$(jq -r ".[$_tool_idx].function.arguments" <<< "$_tool_calls")
+
+      if [[ "$_func_name" == "run_shell" ]]; then
+        _shell_cmd=$(jq -r '.command // empty' <<< "$_func_args")
+        _shell_reason=$(jq -r '.reason // ""' <<< "$_func_args")
+        if [[ -z "$_shell_cmd" ]]; then
+          _tool_result="Error: run_shell called with empty command"
+        else
+          _tool_result=$(_exec_shell_tool "$_shell_cmd" "$_shell_reason")
+        fi
+      else
+        _tool_result="Error: unknown tool '${_func_name}'"
+      fi
+
+      _msgs=$(jq -n \
+        --argjson h "$_msgs" \
+        --arg id      "$_call_id" \
+        --arg content "$_tool_result" \
+        '$h + [{"role":"tool","tool_call_id":$id,"content":$content}]')
+    done
+    _iter=$((_iter + 1))
+  done
+
+  # Max iterations reached — final call without tools
+  ask "$_msgs" false
+  _content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
+  printf '%s\n' "$_content"
+  printf '%s' "$_content" > "$AI_TMP/last_stream.txt"
 }
 
 # ── session helpers ───────────────────────────────────────────────────────────
@@ -290,6 +542,7 @@ save_session() {
 if [[ "$MODE" = "interactive" ]]; then
   CONV='[]'
   PLAN_MODE=false
+  SESSION_DELEGATIONS=0
 
   HISTFILE="$HOME/.ai-os/sessions/interactive_history"
   HISTSIZE=500
@@ -302,12 +555,86 @@ if [[ "$MODE" = "interactive" ]]; then
   [[ "${TERM_PROGRAM:-}" == "WarpTerminal" ]] && WARP=true
   warp_seq() { [[ -n "$WARP" ]] && printf '\033]133;%s\007' "$1"; }
 
+  # ESC interrupt helpers
+  _ESC_PID=""
+  _start_esc_monitor() {
+    local _ppid=$$
+    (
+      { exec </dev/tty; } 2>/dev/null || exit 0
+      _k=""
+      while kill -0 "$_ppid" 2>/dev/null; do
+        _k=""
+        IFS= read -r -s -t 1 -n 1 _k || true
+        [[ "$_k" == $'\033' ]] && kill -INT "$_ppid" 2>/dev/null && break
+      done
+    ) &
+    _ESC_PID=$!
+  }
+  _stop_esc_monitor() {
+    if [[ -n "$_ESC_PID" ]]; then
+      kill "$_ESC_PID" 2>/dev/null || true
+      wait "$_ESC_PID" 2>/dev/null || true
+      _ESC_PID=""
+    fi
+  }
+
   # Tab completion for slash commands
   __ai_tab() {
-    local cmds=("/status" "/reset" "/compact" "/plan" "/batch " "/save " "/load "
-                 "/model " "/memory" "/clear" "/help" "/exit")
     local cur="$READLINE_LINE"
+
+    # /memory sub-command cycling
+    if [[ "$cur" = "/memory" || "$cur" = "/memory " \
+       || "$cur" = "/memory edit"* || "$cur" = "/memory add"* ]]; then
+      local _mopts=("/memory edit " "/memory add ")
+      local _mnext=0 _mi
+      for _mi in "${!_mopts[@]}"; do
+        local _mopt="${_mopts[$_mi]%' '}"
+        if [[ "$cur" = "${_mopts[$_mi]}" || "$cur" = "$_mopt" ]]; then
+          _mnext=$(( (_mi + 1) % ${#_mopts[@]} ))
+          break
+        fi
+      done
+      printf '\n  '
+      for _mi in "${!_mopts[@]}"; do
+        [[ "$_mi" -eq "$_mnext" ]] \
+          && printf '\033[1;32m[%s]\033[0m  ' "${_mopts[$_mi]}" \
+          || printf '%s  ' "${_mopts[$_mi]}"
+      done
+      printf '\n'
+      READLINE_LINE="${_mopts[$_mnext]}"
+      READLINE_POINT=${#READLINE_LINE}
+      return
+    fi
+
+    # /project sub-command cycling: Tab cycles through sub-commands
+    if [[ "$cur" = "/project" || "$cur" = "/project " \
+       || "$cur" = "/project new"* || "$cur" = "/project list"* \
+       || "$cur" = "/project set"* || "$cur" = "/project clear"* ]]; then
+      local _popts=("/project new " "/project list" "/project set " "/project clear")
+      local _pnext=0 _pi
+      for _pi in "${!_popts[@]}"; do
+        local _opt="${_popts[$_pi]%' '}"
+        if [[ "$cur" = "${_popts[$_pi]}" || "$cur" = "$_opt" ]]; then
+          _pnext=$(( (_pi + 1) % ${#_popts[@]} ))
+          break
+        fi
+      done
+      printf '\n  '
+      for _pi in "${!_popts[@]}"; do
+        [[ "$_pi" -eq "$_pnext" ]] \
+          && printf '\033[1;32m[%s]\033[0m  ' "${_popts[$_pi]}" \
+          || printf '%s  ' "${_popts[$_pi]}"
+      done
+      printf '\n'
+      READLINE_LINE="${_popts[$_pnext]}"
+      READLINE_POINT=${#READLINE_LINE}
+      return
+    fi
+
+    # Standard slash command prefix completion
     [[ "$cur" != /* ]] && return
+    local cmds=("/status" "/reset" "/compact" "/plan" "/batch " "/save " "/load "
+                 "/model " "/memory" "/project" "/workspace" "/clear" "/help" "/exit")
     local matches=()
     for c in "${cmds[@]}"; do
       [[ "$c" = "$cur"* ]] && matches+=("$c")
@@ -333,6 +660,16 @@ if [[ "$MODE" = "interactive" ]]; then
 
     history -s "$INPUT"
 
+    # Shell passthrough — model is bypassed entirely, no tokens used
+    if [[ "$INPUT" = "!"* ]]; then
+      local_shell_cmd="${INPUT:1}"
+      if [[ -n "$local_shell_cmd" ]]; then
+        eval "$local_shell_cmd" || true
+      fi
+      warp_seq "D;0"
+      continue
+    fi
+
     if [[ "$INPUT" = /* ]]; then
       case "$INPUT" in
         /status)
@@ -340,23 +677,300 @@ if [[ "$MODE" = "interactive" ]]; then
           CONV_TOKENS=$(estimate_tokens "$CONV")
           MEM_SIZE=0
           [[ -f ~/.ai-os/memory.md ]] && MEM_SIZE=$(wc -c < ~/.ai-os/memory.md | tr -d ' ')
-          printf 'model:              %s\ntemperature:        %s\nmessages:           %s\nestim. tokens:      %s\nprompt_tokens:      %s\ncompletion_tokens:  %s\nmemory:             %s B\n' \
-            "$MODEL_NAME" "$TEMPERATURE" "$MSG_COUNT" "$CONV_TOKENS" "$LAST_PROMPT_TOKENS" "$LAST_COMPLETION_TOKENS" "$MEM_SIZE"
+          printf 'model:              %s\ntemperature:        %s\nmessages:           %s\nestim. tokens:      %s\nprompt_tokens:      %s\ncompletion_tokens:  %s\nmemory:             %s B\ndelegations:        %s\n' \
+            "$MODEL_NAME" "$TEMPERATURE" "$MSG_COUNT" "$CONV_TOKENS" "$LAST_PROMPT_TOKENS" "$LAST_COMPLETION_TOKENS" "$MEM_SIZE" "$SESSION_DELEGATIONS"
           ;;
         /reset)
           CONV='[]'
           echo "História konverzácie vymazaná."
           ;;
-        /memory)
-          local_shown=0
-          for local_f in ~/.ai-os/instructions.md ~/.ai-os/memory.md ~/.ai-os/context.md ~/.ai-os/context/global.md; do
-            if [[ -f "$local_f" ]]; then
-              printf '\n── %s ──\n' "$local_f"
-              cat "$local_f"
-              local_shown=1
+        /memory*)
+          local_mem_sub="${INPUT#/memory}"
+          local_mem_sub="${local_mem_sub# }"
+          case "$local_mem_sub" in
+            add\ *|add)
+              local_mem_text="${local_mem_sub#add}"
+              local_mem_text="${local_mem_text# }"
+              if [[ -z "$local_mem_text" ]]; then
+                echo "Použitie: /memory add <text>"
+              else
+                printf '\n%s\n' "$local_mem_text" >> ~/.ai-os/memory.md
+                echo "Zapísané do memory.md."
+              fi
+              ;;
+            edit*)
+              local_mem_key="${local_mem_sub#edit}"
+              local_mem_key="${local_mem_key# }"
+              # Build key→file map
+              local_mem_ws=""
+              [[ -f ~/.ai-os/workspace ]] && local_mem_ws=$(< ~/.ai-os/workspace) && local_mem_ws="${local_mem_ws%$'\n'}"
+              local_mem_proj=""
+              [[ -f ~/.ai-os/current-project ]] && local_mem_proj=$(< ~/.ai-os/current-project) && local_mem_proj="${local_mem_proj%$'\n'}"
+              # Interactive pick if no key given
+              if [[ -z "$local_mem_key" ]]; then
+                printf 'Dostupné súbory:\n'
+                printf '  instructions      ~/.ai-os/instructions.md\n'
+                printf '  memory            ~/.ai-os/memory.md\n'
+                printf '  context           ~/.ai-os/context.md\n'
+                [[ -n "$local_mem_ws" ]] && printf '  ws                %s/ds.md\n' "$local_mem_ws"
+                [[ -n "$local_mem_ws" ]] && printf '  ws-instructions   %s/memory/instructions.md\n' "$local_mem_ws"
+                [[ -n "$local_mem_ws" ]] && printf '  ws-memory         %s/memory/memory.md\n' "$local_mem_ws"
+                [[ -n "$local_mem_ws" ]] && printf '  ws-context        %s/memory/context.md\n' "$local_mem_ws"
+                [[ -n "$local_mem_proj" ]] && printf '  proj              %s/ds.md\n' "$local_mem_proj"
+                printf 'Kľúč: '
+                IFS= read -r local_mem_key || local_mem_key=""
+              fi
+              case "$local_mem_key" in
+                instructions) local_mem_edit_f=~/.ai-os/instructions.md ;;
+                memory)       local_mem_edit_f=~/.ai-os/memory.md ;;
+                context)      local_mem_edit_f=~/.ai-os/context.md ;;
+                ws)           local_mem_edit_f="${local_mem_ws}/ds.md" ;;
+                ws-instructions) local_mem_edit_f="${local_mem_ws}/memory/instructions.md" ;;
+                ws-memory)    local_mem_edit_f="${local_mem_ws}/memory/memory.md" ;;
+                ws-context)   local_mem_edit_f="${local_mem_ws}/memory/context.md" ;;
+                proj)         local_mem_edit_f="${local_mem_proj}/ds.md" ;;
+                *) echo "Neznámy kľúč '${local_mem_key}'. Použi: instructions|memory|context|ws|ws-instructions|ws-memory|ws-context|proj" ;;
+              esac
+              if [[ -n "${local_mem_edit_f:-}" ]]; then
+                if [[ -z "$local_mem_ws" && "$local_mem_key" = ws* ]]; then
+                  echo "Workspace nie je nastavený. Použi /workspace."
+                elif [[ -z "$local_mem_proj" && "$local_mem_key" = proj ]]; then
+                  echo "Projekt nie je nastavený. Použi /project set alebo /project new."
+                else
+                  ${EDITOR:-nano} "$local_mem_edit_f" </dev/tty >/dev/tty 2>/dev/tty || true
+                fi
+              fi
+              ;;
+            "")
+              # Display all layers
+              printf '\n── Globálne ─────────────────────────────────\n'
+              local_mem_shown=0
+              for local_f in ~/.ai-os/instructions.md ~/.ai-os/memory.md ~/.ai-os/context.md ~/.ai-os/context/global.md; do
+                if [[ -f "$local_f" ]]; then
+                  printf '\n  %s\n' "$local_f"
+                  sed 's/^/  /' "$local_f"
+                  local_mem_shown=1
+                fi
+              done
+              [[ "$local_mem_shown" -eq 0 ]] && echo "  (žiadne globálne súbory)"
+              if [[ -f ~/.ai-os/workspace ]]; then
+                local_mem_ws2=$(< ~/.ai-os/workspace); local_mem_ws2="${local_mem_ws2%$'\n'}"
+                printf '\n── Workspace ────────────────────────────────\n'
+                local_mem_ws_shown=0
+                for local_wf in "$local_mem_ws2/ds.md" "$local_mem_ws2/memory/instructions.md" \
+                                  "$local_mem_ws2/memory/memory.md" "$local_mem_ws2/memory/context.md"; do
+                  if [[ -f "$local_wf" ]]; then
+                    printf '\n  %s\n' "$local_wf"
+                    sed 's/^/  /' "$local_wf"
+                    local_mem_ws_shown=1
+                  fi
+                done
+                [[ "$local_mem_ws_shown" -eq 0 ]] && echo "  (žiadne workspace súbory)"
+              fi
+              if [[ -f ~/.ai-os/current-project ]]; then
+                local_mem_proj2=$(< ~/.ai-os/current-project); local_mem_proj2="${local_mem_proj2%$'\n'}"
+                printf '\n── Projekt: %s ──────────────────────────────\n' "$(basename "$local_mem_proj2")"
+                if [[ -f "$local_mem_proj2/ds.md" ]]; then
+                  printf '\n  %s\n' "$local_mem_proj2/ds.md"
+                  sed 's/^/  /' "$local_mem_proj2/ds.md"
+                else
+                  echo "  (ds.md nenájdený)"
+                fi
+              fi
+              ;;
+            *)
+              echo "Použitie: /memory | /memory edit [kľúč] | /memory add <text>"
+              ;;
+          esac
+          ;;
+        /project*)
+          local_proj_sub="${INPUT#/project}"
+          local_proj_sub="${local_proj_sub# }"
+          case "$local_proj_sub" in
+            "")
+              if [[ -f ~/.ai-os/current-project ]]; then
+                local_cur_p=$(< ~/.ai-os/current-project)
+                printf 'Projekt:    %s  (%s)\n' "$(basename "$local_cur_p")" "$local_cur_p"
+              else
+                printf 'Projekt:    (žiadny)\n'
+              fi
+              if [[ -f ~/.ai-os/workspace ]]; then
+                printf 'Workspace:  %s\n' "$(< ~/.ai-os/workspace)"
+              else
+                printf 'Workspace:  (nenastavený — použi /workspace)\n'
+              fi
+              ;;
+            new|new\ *)
+              local_proj_new_name="${local_proj_sub#new}"
+              local_proj_new_name="${local_proj_new_name# }"
+              if [[ ! -f ~/.ai-os/workspace ]]; then
+                echo "Najprv nastav workspace cez /workspace"
+              else
+                local_proj_ws=$(< ~/.ai-os/workspace); local_proj_ws="${local_proj_ws%$'\n'}"
+                if [[ -z "$local_proj_new_name" ]]; then
+                  printf 'Názov projektu: '
+                  IFS= read -er local_proj_new_name || local_proj_new_name=""
+                fi
+                local_proj_new_name="${local_proj_new_name//[^a-zA-Z0-9_-]/}"
+                if [[ -z "$local_proj_new_name" ]]; then
+                  echo "Chyba: názov projektu je prázdny alebo neplatný."
+                else
+                  local_proj_dir="$local_proj_ws/$local_proj_new_name"
+                  [[ -d "$local_proj_dir" ]] && echo "Upozornenie: adresár už existuje."
+                  mkdir -p "$local_proj_dir"
+                  if [[ ! -f "$local_proj_dir/ds.md" ]]; then
+                    cat > "$local_proj_dir/ds.md" << PROJDS
+# ${local_proj_new_name}
+
+## O projekte
+
+## Technológie
+
+## Konvencie
+PROJDS
+                  fi
+                  if [[ ! -f "$local_proj_dir/context.md" ]]; then
+                    cat > "$local_proj_dir/context.md" << PROJCTX
+# Aktívny kontext — ${local_proj_new_name}
+
+## Aktuálna úloha
+
+## Dôležité súbory
+PROJCTX
+                  fi
+                  echo "✓ Projekt vytvorený: $local_proj_dir"
+                  for local_pf in "$local_proj_dir/ds.md" "$local_proj_dir/context.md"; do
+                    printf 'Upraviť %s? [y/N] ' "$(basename "$local_pf")"
+                    local_pans=""
+                    IFS= read -r local_pans || local_pans="n"
+                    if [[ "$local_pans" =~ ^[Yy]$ ]]; then
+                      ${EDITOR:-nano} "$local_pf" </dev/tty >/dev/tty 2>/dev/tty || true
+                    fi
+                  done
+                  printf '%s\n' "$local_proj_dir" > ~/.ai-os/current-project
+                  echo "Projekt nastavený ako aktívny."
+                fi
+              fi
+              ;;
+            list)
+              if [[ ! -f ~/.ai-os/workspace ]]; then
+                echo "Workspace nie je nastavený. Použi /workspace."
+              else
+                local_list_ws=$(< ~/.ai-os/workspace); local_list_ws="${local_list_ws%$'\n'}"
+                local_list_cur=""
+                [[ -f ~/.ai-os/current-project ]] && local_list_cur=$(< ~/.ai-os/current-project)
+                local_list_cur="${local_list_cur%$'\n'}"
+                local_list_found=0
+                while IFS= read -r local_list_pd; do
+                  [[ -z "$local_list_pd" ]] && continue
+                  if [[ "$local_list_pd" = "$local_list_cur" ]]; then
+                    printf '  ▶ %s\n' "$(basename "$local_list_pd")"
+                  else
+                    printf '    %s\n' "$(basename "$local_list_pd")"
+                  fi
+                  local_list_found=1
+                done < <(find "$local_list_ws" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
+                [[ "$local_list_found" -eq 0 ]] && echo "(žiadne projekty v $local_list_ws)"
+              fi
+              ;;
+            clear)
+              if [[ -f ~/.ai-os/current-project ]]; then
+                local_clr_cur=$(< ~/.ai-os/current-project)
+                printf 'Naozaj vymazať aktívny projekt "%s"? [y/N] ' "$(basename "$local_clr_cur")"
+                local_clr_ans=""
+                IFS= read -r local_clr_ans || local_clr_ans="n"
+                if [[ "$local_clr_ans" =~ ^[Yy]$ ]]; then
+                  rm -f ~/.ai-os/current-project
+                  echo "Projekt vymazaný."
+                else
+                  echo "Zrušené."
+                fi
+              else
+                echo "(žiadny aktívny projekt)"
+              fi
+              ;;
+            set\ *)
+              local_proj_path="${local_proj_sub#set }"
+              if [[ "$local_proj_path" = "$HOME"* && -f "$local_proj_path/ds.md" ]]; then
+                printf '%s\n' "$local_proj_path" > ~/.ai-os/current-project
+                echo "Projekt nastavený: $local_proj_path"
+              else
+                echo "Chyba: cesta musí byť v $HOME a obsahovať ds.md" >&2
+              fi
+              ;;
+            *)
+              echo "Použitie: /project | /project new [názov] | /project list | /project set <cesta> | /project clear"
+              ;;
+          esac
+          ;;
+        /workspace*)
+          local_ws_arg="${INPUT#/workspace}"
+          local_ws_arg="${local_ws_arg# }"
+          if [[ -z "$local_ws_arg" ]]; then
+            if [[ -f ~/.ai-os/workspace ]]; then
+              printf 'Aktuálny workspace: %s\n' "$(< ~/.ai-os/workspace)"
             fi
-          done
-          [[ "$local_shown" -eq 0 ]] && echo "(žiadne kontextové súbory nenájdené)"
+            printf 'Zadaj cestu alebo meno nového adresára (Enter = zrušiť): '
+            IFS= read -er local_ws_arg || local_ws_arg=""
+          fi
+          if [[ -z "$local_ws_arg" ]]; then
+            echo "Zrušené."
+          else
+            if [[ "$local_ws_arg" = "~"* ]]; then
+              local_ws_path="${local_ws_arg/#\~/$HOME}"
+            elif [[ "$local_ws_arg" = /* ]]; then
+              local_ws_path="$local_ws_arg"
+            else
+              local_ws_path="$PWD/$local_ws_arg"
+            fi
+            if [[ "$local_ws_path" != "$HOME"* ]]; then
+              echo "Chyba: workspace musí byť v rámci domovského adresára." >&2
+            else
+              mkdir -p "$local_ws_path/memory"
+              printf '%s\n' "$local_ws_path" > ~/.ai-os/workspace
+              # ds.md in workspace root
+              if [[ ! -f "$local_ws_path/ds.md" ]]; then
+                cat > "$local_ws_path/ds.md" << 'WSDSEOF'
+# Workspace — sprievodca globálnymi súbormi
+
+- `memory/instructions.md` — pravidlá správania, jazyk, tón pre tento workspace
+- `memory/memory.md`        — nahromadené fakty, preferencie, kontext projektov
+- `memory/context.md`       — voliteľný aktívny kontext (dočasný)
+
+Tento súbor je načítaný automaticky pri každom štarte. Nemazať.
+WSDSEOF
+                echo "  ✓ ds.md"
+              fi
+              # memory/instructions.md
+              if [[ ! -f "$local_ws_path/memory/instructions.md" ]]; then
+                printf '## Identity\n\n## Language\n\n## Behavior\n' \
+                  > "$local_ws_path/memory/instructions.md"
+                echo "  ✓ memory/instructions.md"
+              fi
+              # memory/memory.md
+              if [[ ! -f "$local_ws_path/memory/memory.md" ]]; then
+                printf '# Memory\n' > "$local_ws_path/memory/memory.md"
+                echo "  ✓ memory/memory.md"
+              fi
+              # memory/context.md
+              if [[ ! -f "$local_ws_path/memory/context.md" ]]; then
+                printf '# Aktívny kontext\n' > "$local_ws_path/memory/context.md"
+                echo "  ✓ memory/context.md"
+              fi
+              echo "Workspace nastavený: $local_ws_path"
+              for local_ws_f in "$local_ws_path/ds.md" \
+                                 "$local_ws_path/memory/instructions.md" \
+                                 "$local_ws_path/memory/memory.md" \
+                                 "$local_ws_path/memory/context.md"; do
+                printf 'Upraviť %s? [y/N] ' "${local_ws_f#$local_ws_path/}"
+                local_ws_ans=""
+                IFS= read -r local_ws_ans || local_ws_ans="n"
+                if [[ "$local_ws_ans" =~ ^[Yy]$ ]]; then
+                  ${EDITOR:-nano} "$local_ws_f" </dev/tty >/dev/tty 2>/dev/tty || true
+                fi
+              done
+            fi
+          fi
           ;;
         /clear)
           printf '\033[2J\033[H'
@@ -434,6 +1048,7 @@ if [[ "$MODE" = "interactive" ]]; then
           fi
           ;;
         /help)
+          printf '!<príkaz>        spustí shell príkaz priamo — model obídený, tokeny ušetrené\n'
           printf '/status          model, teplota, správy, tokeny, pamäť\n'
           printf '/reset           vymaže históriu aktuálnej konverzácie\n'
           printf '/compact         komprimuje konverzáciu (zachová kontext)\n'
@@ -441,8 +1056,12 @@ if [[ "$MODE" = "interactive" ]]; then
           printf '/batch <súbor>   spustí prompty zo súboru sekvenčne\n'
           printf '/save [meno]     uloží konverzáciu do named session\n'
           printf '/load [meno]     načíta named session\n'
-          printf '/model [flash|pro]  prepne model\n'
-          printf '/memory          zobrazí kontextové súbory (instructions, memory, context)\n'
+          printf '/model [flash|pro]  prepne model  (pro deleguje subtasky na flash + run_shell)\n'
+          printf '/memory          zobrazí všetky kontext vrstvy (globálne + workspace + projekt)\n'
+          printf '/memory edit [kľúč]  otvorí súbor v editore  (instructions|memory|context|ws|proj)\n'
+          printf '/memory add <text>  rýchly zápis do ~/.ai-os/memory.md\n'
+          printf '/workspace [cesta]  nastaví Projektovú záložku, vytvorí ds.md + memory/\n'
+          printf '/project         info  |  new [názov]  |  list  |  set <cesta>  |  clear\n'
           printf '/clear           vymaže obrazovku\n'
           printf '/help            tento zoznam\n'
           printf '/exit            ukončí session\n'
@@ -466,11 +1085,34 @@ if [[ "$MODE" = "interactive" ]]; then
 
     CONV=$(jq -n --argjson h "$CONV" --arg c "$INPUT" '$h + [{"role":"user","content":$c}]')
     printf '\nai: '
-    ask "$CONV" true || {
+
+    _AI_INTERRUPTED=0
+    trap '_AI_INTERRUPTED=1' INT
+    _start_esc_monitor
+
+    _ask_ok=0
+    if [[ "$MODEL" == "pro" ]]; then
+      run_agentic "$CONV" && _ask_ok=1 || true
+    else
+      run_interactive_flash "$CONV" && _ask_ok=1 || true
+    fi
+
+    trap - INT
+    _stop_esc_monitor
+
+    if [[ "$_AI_INTERRUPTED" -eq 1 ]]; then
+      printf '\n[prerušené]\n'
+      CONV=$(jq '.[:-1]' <<< "$CONV")
+      warp_seq "D;1"
+      continue
+    fi
+
+    if [[ "$_ask_ok" -eq 0 ]]; then
       printf '\nChyba: %s\n' "$(jq -r '.error.message // "no output"' "$AI_TMP/last_output.json")" >&2
       warp_seq "D;1"
       continue
-    }
+    fi
+
     OUTPUT=$(< "$AI_TMP/last_stream.txt")
     if [[ -z "$OUTPUT" ]]; then
       printf '\nChyba: žiadna odpoveď\n' >&2
@@ -495,9 +1137,16 @@ fi
 
 MESSAGES=$(jq -n --argjson h "$MESSAGES" --arg c "$PROMPT" '$h + [{"role":"user","content":$c}]')
 
-if ! ask "$MESSAGES" true; then
-  echo "Error: $(jq -r '.error.message // "no output – see ~/.ai-os/tmp/last_output.json"' "$AI_TMP/last_output.json")" >&2
-  exit 1
+if [[ "$MODEL" == "pro" ]]; then
+  if ! run_agentic "$MESSAGES"; then
+    echo "Error: $(jq -r '.error.message // "no output – see ~/.ai-os/tmp/last_output.json"' "$AI_TMP/last_output.json")" >&2
+    exit 1
+  fi
+else
+  if ! ask "$MESSAGES" true; then
+    echo "Error: $(jq -r '.error.message // "no output – see ~/.ai-os/tmp/last_output.json"' "$AI_TMP/last_output.json")" >&2
+    exit 1
+  fi
 fi
 
 OUTPUT=$(< "$AI_TMP/last_stream.txt")

@@ -1005,9 +1005,11 @@ WSDSEOF
             local_plan_buf=""
             while IFS= read -er local_plan_line; do
               [[ "$local_plan_line" = "." ]] && break
-              local_plan_buf+="${local_plan_line}"$'\n'
+              local_plan_buf="${local_plan_buf}${local_plan_line}
+"
             done
-            local_plan_buf="${local_plan_buf%$'\n'}"
+            local_plan_buf="${local_plan_buf%
+}"
             if [[ -n "$local_plan_buf" ]]; then
               INPUT="$local_plan_buf"
               PLAN_MODE=true

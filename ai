@@ -179,11 +179,19 @@ save_session() {
 
 if [[ "$MODE" = "interactive" ]]; then
   CONV='[]'
+  PLAN_MODE=false
+
+  # Isolated readline history (does not pollute the user's ~/.bash_history)
+  HISTFILE="$HOME/.ai-os/sessions/interactive_history"
+  HISTSIZE=500
+  HISTFILESIZE=500
+  mkdir -p "$(dirname "$HISTFILE")"
+  history -r "$HISTFILE" 2>/dev/null || true
+
   echo "AI-OS  •  $MODEL  •  /help pre príkazy  •  Ctrl+C na ukončenie"
   echo "────────────────────────────────────────────────────────────────"
   while true; do
-    printf '\nty: '
-    read -r INPUT || break
+    read -er -p $'\nty: ' INPUT || break
     [[ "$INPUT" = "exit" || "$INPUT" = "quit" || -z "$INPUT" ]] && break
 
     if [[ "$INPUT" = /* ]]; then
@@ -207,12 +215,81 @@ if [[ "$MODE" = "interactive" ]]; then
             echo "(súbor neexistuje: ~/.ai-os/context/global.md)"
           fi
           ;;
+        /clear)
+          printf '\033[2J\033[H'
+          ;;
+        /model*)
+          local_m="${INPUT#/model}"
+          local_m="${local_m# }"
+          case "$local_m" in
+            flash) MODEL="flash"; MODEL_NAME="deepseek-v4-flash"; echo "Model prepnutý na: flash" ;;
+            pro)   MODEL="pro";   MODEL_NAME="deepseek-v4-pro";   echo "Model prepnutý na: pro" ;;
+            "")    echo "Aktuálny model: $MODEL ($MODEL_NAME)" ;;
+            *)     echo "Použitie: /model [flash|pro]" ;;
+          esac
+          ;;
+        /compact)
+          local_compressed=$(compress_history "$CONV") || { echo "Komprimácia zlyhala."; continue; }
+          CONV="$local_compressed"
+          echo "Konverzácia komprimovaná. Správy: $(jq 'length' <<< "$CONV")"
+          ;;
+        /plan)
+          PLAN_MODE=true
+          echo "Plánovací mód: ďalšia správa bude odoslaná s inštrukciou na vypracovanie plánu."
+          ;;
+        /batch*)
+          local_file="${INPUT#/batch}"
+          local_file="${local_file# }"
+          if [[ -z "$local_file" || ! -f "$local_file" ]]; then
+            echo "Použitie: /batch <súbor>  (každý riadok = jeden prompt)"
+          else
+            while IFS= read -r local_line; do
+              [[ -z "$local_line" || "$local_line" = "#"* ]] && continue
+              printf '\n>>> %s\n' "$local_line"
+              CONV=$(jq -n --argjson h "$CONV" --arg c "$local_line" '$h + [{"role":"user","content":$c}]')
+              local_out=$(ask "$CONV")
+              if [[ -z "$local_out" ]]; then
+                echo "Chyba API pri '$local_line'" >&2
+              else
+                printf '\nai: %s\n' "$local_out"
+                CONV=$(jq -n --argjson h "$CONV" --arg c "$local_out" '$h + [{"role":"assistant","content":$c}]')
+              fi
+            done < "$local_file"
+          fi
+          ;;
+        /save*)
+          local_name="${INPUT#/save}"
+          local_name="${local_name# }"
+          local_name="${local_name:-default}"
+          mkdir -p "$HOME/.ai-os/sessions/named"
+          echo "$CONV" > "$HOME/.ai-os/sessions/named/${local_name}.json"
+          echo "Session uložená: $local_name"
+          ;;
+        /load*)
+          local_name="${INPUT#/load}"
+          local_name="${local_name# }"
+          local_name="${local_name:-default}"
+          local_f="$HOME/.ai-os/sessions/named/${local_name}.json"
+          if [[ -f "$local_f" ]]; then
+            CONV=$(< "$local_f")
+            echo "Session načítaná: $local_name ($(jq 'length' <<< "$CONV") správ)"
+          else
+            echo "Session nenájdená: $local_name"
+          fi
+          ;;
         /help)
-          printf '/status   model, teplota, počet správ, odhadnuté tokeny, veľkosť pamäte\n'
-          printf '/reset    vymaže históriu aktuálnej konverzácie\n'
-          printf '/memory   zobrazí obsah global.md\n'
-          printf '/help     tento zoznam\n'
-          printf '/exit     ukončí session\n'
+          printf '/status          model, teplota, správy, tokeny, pamäť\n'
+          printf '/reset           vymaže históriu aktuálnej konverzácie\n'
+          printf '/compact         komprimuje konverzáciu (zachová kontext)\n'
+          printf '/plan            ďalšia správa = výstup ako plán (nie implementácia)\n'
+          printf '/batch <súbor>   spustí prompty zo súboru sekvenčne\n'
+          printf '/save [meno]     uloží konverzáciu do named session\n'
+          printf '/load [meno]     načíta named session\n'
+          printf '/model [flash|pro]  prepne model\n'
+          printf '/memory          zobrazí obsah global.md\n'
+          printf '/clear           vymaže obrazovku\n'
+          printf '/help            tento zoznam\n'
+          printf '/exit            ukončí session\n'
           ;;
         /exit)
           break
@@ -224,6 +301,13 @@ if [[ "$MODE" = "interactive" ]]; then
       continue
     fi
 
+    # Apply plan mode prefix if set
+    if [[ "$PLAN_MODE" == true ]]; then
+      INPUT="Respond with a structured step-by-step plan only. Do not implement anything. Request: ${INPUT}"
+      PLAN_MODE=false
+    fi
+
+    history -s "$INPUT"
     CONV=$(jq -n --argjson h "$CONV" --arg c "$INPUT" '$h + [{"role":"user","content":$c}]')
     OUTPUT=$(ask "$CONV")
 
@@ -236,6 +320,8 @@ if [[ "$MODE" = "interactive" ]]; then
     echo "ai: $OUTPUT"
     CONV=$(jq -n --argjson h "$CONV" --arg c "$OUTPUT" '$h + [{"role":"assistant","content":$c}]')
   done
+
+  history -w
   exit 0
 fi
 

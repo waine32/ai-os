@@ -29,6 +29,7 @@ setup() {
   rm -f "$HOME/.ai-os/sessions/history.json"
   rm -f "$HOME/.ai-os/sessions/history.txt"
   rm -f "$HOME/.ai-os/context/global.md"
+  rm -f "$HOME/.ai-os/sessions/interactive_history"
   rm -f /tmp/curl_payload.json
   # Restore the original mock curl before each test
   cat > "$MOCK_BIN/curl" << 'MOCKCURL'
@@ -319,4 +320,105 @@ MOCKCURL
 
   # Verify new entries appended
   [ "$(jq '.[2].content' < "$hist_file")" = '"second"' ]
+}
+
+@test "history file is created after interactive session" {
+  run bash -c "printf 'hello\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/.ai-os/sessions/interactive_history" ]
+}
+
+@test "/clear does not crash" {
+  run bash -c "printf '/clear\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+}
+
+@test "/model switches model" {
+  run bash -c "printf '/model invalid\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Použitie"* ]]
+}
+
+@test "/model with no arg shows current model" {
+  run bash -c "printf '/model\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"flash"* ]]
+}
+
+@test "/plan sets planning prefix on next message" {
+  # Create a capture script for curl to save the payload (-d argument)
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then
+    echo "$arg" > /tmp/curl_payload.json
+    found_d=0
+  fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+if [[ -n "${MOCK_CURL_RESPONSE:-}" ]]; then
+  echo "$MOCK_CURL_RESPONSE"
+else
+  echo '{"choices":[{"message":{"content":"test response"}}]}'
+fi
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+
+  rm -f /tmp/curl_payload.json
+
+  run bash -c "printf '/plan\nwrite a scraper\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+
+  local payload=$(< /tmp/curl_payload.json)
+  [[ "$payload" == *"step-by-step plan"* ]]
+}
+
+@test "/batch with a temp file" {
+  local tmpfile=$(mktemp)
+  printf 'first prompt\nsecond prompt\n' > "$tmpfile"
+
+  run bash -c "printf '/batch $tmpfile\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"first prompt"* ]]
+
+  rm -f "$tmpfile"
+}
+
+@test "/save and /load round-trip" {
+  run bash -c "printf '/save mytest\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/.ai-os/sessions/named/mytest.json" ]
+
+  run bash -c "printf '/load mytest\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"načítaná"* ]]
+}
+
+@test "/compact on non-empty CONV" {
+  # Create a capture script for curl to save the payload (-d argument)
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then
+    echo "$arg" > /tmp/curl_payload.json
+    found_d=0
+  fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+if [[ -n "${MOCK_CURL_RESPONSE:-}" ]]; then
+  echo "$MOCK_CURL_RESPONSE"
+else
+  echo '{"choices":[{"message":{"content":"test response"}}]}'
+fi
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+
+  rm -f /tmp/curl_payload.json
+
+  run bash -c "printf 'msg1\nmsg2\n/compact\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"komprimovaná"* ]]
 }

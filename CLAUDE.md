@@ -19,8 +19,8 @@ ai pro "solve this step by step: ..."
 ai flash --session "continue where we left off"
 
 # Interactive mode
-ai flash --interactive
 ai flash -i
+ai flash --interactive
 ```
 
 Requires `DEEPSEEK_API_KEY` in env. The binary is the file `ai` (executable, no extension) at the repo root.
@@ -44,13 +44,26 @@ Both hit `https://api.deepseek.com/chat/completions`.
 
 Entered as `/command` in the interactive prompt. No API call is made; handled locally.
 
-- `/status` — show model name, temperature, message count in conversation, estimated token count, and memory file size in bytes.
-- `/reset` — clear conversation history (does not clear memory or session files).
-- `/memory` — display contents of `~/.ai-os/context/global.md`.
-- `/help` — list all slash commands.
-- `/exit` — exit interactive session.
+| Command | Description |
+|---------|-------------|
+| `/status` | Show model name, temperature, message count, estimated token count, and memory file size |
+| `/reset` | Clear conversation history (does not affect memory or session files) |
+| `/compact` | Compress conversation history while preserving context |
+| `/plan` | Next message outputs only a structured plan, no implementation |
+| `/batch <file>` | Run prompts from file sequentially (one per line, ignores comments with `#`) |
+| `/save [name]` | Save current conversation to a named session |
+| `/load [name]` | Load a previously saved named session |
+| `/model [flash\|pro]` | Switch between models (flash for speed, pro for thoroughness) |
+| `/memory` | Display contents of `~/.ai-os/context/global.md` |
+| `/clear` | Clear the terminal screen |
+| `/help` | List all slash commands |
+| `/exit` | Exit the interactive session |
 
 Also exits on `exit`, `quit`, or empty input.
+
+### Command history
+
+Up-arrow / down-arrow recalls previous prompts using GNU readline (via `read -er`). History is automatically persisted to `~/.ai-os/sessions/interactive_history` across sessions, allowing you to recall prompts even after exiting the program. This readline history is isolated and does not pollute your main shell history.
 
 ## Environment variables
 
@@ -61,10 +74,12 @@ Also exits on `exit`, `quit`, or empty input.
 ## File layout
 
 ```
-ai                              # single executable bash script (the entire router)
-~/.ai-os/context/global.md      # persistent memory injected as system prompt prefix
-~/.ai-os/sessions/history.json  # session mode history (JSON array of objects)
-/tmp/ai_last_output.txt         # last raw API response (for debugging)
+ai                                      # single executable bash script (the entire router)
+~/.ai-os/context/global.md              # persistent memory injected as system prompt prefix
+~/.ai-os/sessions/history.json          # session mode history (JSON array of objects)
+~/.ai-os/sessions/interactive_history   # readline history for interactive mode (up-arrow recall)
+~/.ai-os/sessions/named/<name>.json     # named sessions saved with /save
+/tmp/ai_last_output.txt                 # last raw API response (for debugging)
 ```
 
 **history.json format:** Array of objects, each with:

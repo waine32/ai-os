@@ -1,0 +1,262 @@
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: ai [flash|pro] [--interactive|-i] [--session] \"prompt\"" >&2
+  exit 1
+fi
+
+MODEL="$1"; shift
+
+MODE="stateless"
+if [[ "${1:-}" = "--interactive" || "${1:-}" = "-i" ]]; then
+  MODE="interactive"; shift
+elif [[ "${1:-}" = "--session" ]]; then
+  MODE="session"; shift
+fi
+
+if [[ "$MODE" != "interactive" ]]; then
+  PROMPT="${*:-}"
+  if [[ -z "$PROMPT" ]]; then
+    echo "Error: prompt is required" >&2
+    exit 1
+  fi
+fi
+
+case "$MODEL" in
+  flash) MODEL_NAME="deepseek-v4-flash" ;;
+  pro)   MODEL_NAME="deepseek-v4-pro" ;;
+  *)
+    echo "Usage: ai [flash|pro] [--interactive|-i] [--session] \"prompt\"" >&2
+    exit 1
+    ;;
+esac
+
+ENDPOINT="https://api.deepseek.com/chat/completions"
+API_KEY="${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is not set}"
+TEMPERATURE="${AI_TEMPERATURE:-0}"
+CONTEXT_LIMIT="${AI_CONTEXT_LIMIT:-6000}"
+HIST_FILE="$HOME/.ai-os/sessions/history.json"
+
+MEMORY=""
+if [[ -f ~/.ai-os/context/global.md ]]; then
+  MEMORY=$(< ~/.ai-os/context/global.md)
+fi
+
+SYSTEM_PROMPT="You are a deterministic CLI assistant. Always respond in Slovak language. Memory context:
+$MEMORY"
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+estimate_tokens() {
+  local s="$1"
+  echo $(( ${#s} / 4 ))
+}
+
+# One-time migration from history.txt → history.json
+migrate_history() {
+  local txt="$HOME/.ai-os/sessions/history.txt"
+  [[ -f "$txt" && ! -f "$HIST_FILE" ]] || return 0
+  local arr='[]' line content
+  while IFS= read -r line; do
+    if [[ "$line" = "USER: "* ]]; then
+      content="${line#USER: }"
+      arr=$(jq -n --argjson h "$arr" --arg c "$content" '$h + [{"role":"user","content":$c}]')
+    elif [[ "$line" = "ASSISTANT: "* ]]; then
+      content="${line#ASSISTANT: }"
+      arr=$(jq -n --argjson h "$arr" --arg c "$content" '$h + [{"role":"assistant","content":$c}]')
+    fi
+  done < "$txt"
+  echo "$arr" > "$HIST_FILE"
+}
+
+# Compress oldest half of turns into a summary; returns new history JSON
+compress_history() {
+  local history_json="$1"
+  local non_summary total half old_turns old_text sum_content sum_msgs summary
+  local prev_summarized new_count recent
+
+  non_summary=$(jq '[.[] | select(.role != "summary")]' <<< "$history_json")
+  total=$(jq 'length' <<< "$non_summary")
+  half=$(( total / 2 ))
+  [[ $half -lt 2 ]] && { echo "$history_json"; return; }
+
+  old_turns=$(jq --argjson n "$half" '.[:$n]' <<< "$non_summary")
+  old_text=$(jq -r '.[] | "\(.role | ascii_upcase): \(.content)"' <<< "$old_turns")
+
+  sum_content=$(printf 'Summarize the following conversation into one concise paragraph. Preserve all key facts, decisions, code snippets, user preferences, and important context. Output only the summary text with no preamble, labels, or explanation.\n\n%s' "$old_text")
+  sum_msgs=$(jq -n --arg c "$sum_content" '[{"role":"user","content":$c}]')
+
+  summary=$(ask "$sum_msgs" 2>/dev/null) || { echo "$history_json"; return; }
+  [[ -z "$summary" ]] && { echo "$history_json"; return; }
+
+  prev_summarized=$(jq '[.[] | select(.role=="summary") | .summarized_turns // 0] | add // 0' <<< "$history_json")
+  new_count=$(( prev_summarized + half ))
+  recent=$(jq --argjson n "$half" '.[$n:]' <<< "$non_summary")
+
+  jq -n \
+    --arg s "$summary" \
+    --argjson n "$new_count" \
+    --argjson r "$recent" \
+    '[{"role":"summary","content":$s,"summarized_turns":$n}] + $r'
+}
+
+# ── API call ──────────────────────────────────────────────────────────────────
+
+ask() {
+  local messages="$1"
+  local all_messages payload
+  all_messages=$(jq -n \
+    --arg    system "$SYSTEM_PROMPT" \
+    --argjson msgs   "$messages" \
+    '[{"role":"system","content":$system}] + $msgs')
+  payload=$(jq -n \
+    --arg    model "$MODEL_NAME" \
+    --argjson msgs  "$all_messages" \
+    --argjson temp  "$TEMPERATURE" \
+    '{"model":$model,"messages":$msgs,"temperature":$temp}')
+
+  local response
+  response=$(curl -s "$ENDPOINT" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $API_KEY" \
+    -d "$payload")
+
+  echo "$response" > /tmp/ai_last_output.txt
+  jq -r '.choices[0].message.content // empty' /tmp/ai_last_output.txt
+}
+
+# ── session helpers ───────────────────────────────────────────────────────────
+
+# Sets global LOADED_MESSAGES and may modify global SYSTEM_PROMPT.
+# Must be called as a plain command, not via $(...), to preserve side-effects.
+LOADED_MESSAGES='[]'
+load_session() {
+  migrate_history
+  if [[ ! -f "$HIST_FILE" ]]; then
+    LOADED_MESSAGES='[]'
+    return
+  fi
+
+  local hist tokens summary_content
+  hist=$(< "$HIST_FILE")
+  tokens=$(estimate_tokens "$hist")
+
+  if [[ $tokens -gt $CONTEXT_LIMIT ]]; then
+    local compressed
+    compressed=$(compress_history "$hist")
+    echo "$compressed" > "$HIST_FILE"
+    hist="$compressed"
+  fi
+
+  # Append summary to SYSTEM_PROMPT so messages array stays user/assistant only
+  summary_content=$(jq -r '[.[] | select(.role=="summary") | .content] | join("\n\n")' <<< "$hist")
+  if [[ -n "$summary_content" ]]; then
+    SYSTEM_PROMPT="${SYSTEM_PROMPT}
+
+[Zhrnutie predchádzajúcej konverzácie]
+${summary_content}"
+  fi
+
+  LOADED_MESSAGES=$(jq '[.[] | select(.role != "summary")]' <<< "$hist")
+}
+
+save_session() {
+  local prompt="$1" output="$2"
+  mkdir -p "$(dirname "$HIST_FILE")"
+  local current='[]'
+  [[ -f "$HIST_FILE" ]] && current=$(< "$HIST_FILE")
+  jq -n \
+    --argjson h "$current" \
+    --arg p "$prompt" \
+    --arg o "$output" \
+    '$h + [{"role":"user","content":$p},{"role":"assistant","content":$o}]' \
+    > "$HIST_FILE"
+}
+
+# ── interactive mode ──────────────────────────────────────────────────────────
+
+if [[ "$MODE" = "interactive" ]]; then
+  CONV='[]'
+  echo "AI-OS  •  $MODEL  •  /help pre príkazy  •  Ctrl+C na ukončenie"
+  echo "────────────────────────────────────────────────────────────────"
+  while true; do
+    printf '\nty: '
+    read -r INPUT || break
+    [[ "$INPUT" = "exit" || "$INPUT" = "quit" || -z "$INPUT" ]] && break
+
+    if [[ "$INPUT" = /* ]]; then
+      case "$INPUT" in
+        /status)
+          MSG_COUNT=$(jq 'length' <<< "$CONV")
+          CONV_TOKENS=$(estimate_tokens "$CONV")
+          MEM_SIZE=0
+          [[ -f ~/.ai-os/context/global.md ]] && MEM_SIZE=$(wc -c < ~/.ai-os/context/global.md | tr -d ' ')
+          printf 'model:          %s\ntemperature:    %s\nmessages:       %s\nestim. tokens:  %s\nmemory:         %s B\n' \
+            "$MODEL_NAME" "$TEMPERATURE" "$MSG_COUNT" "$CONV_TOKENS" "$MEM_SIZE"
+          ;;
+        /reset)
+          CONV='[]'
+          echo "História konverzácie vymazaná."
+          ;;
+        /memory)
+          if [[ -f ~/.ai-os/context/global.md ]]; then
+            cat ~/.ai-os/context/global.md
+          else
+            echo "(súbor neexistuje: ~/.ai-os/context/global.md)"
+          fi
+          ;;
+        /help)
+          printf '/status   model, teplota, počet správ, odhadnuté tokeny, veľkosť pamäte\n'
+          printf '/reset    vymaže históriu aktuálnej konverzácie\n'
+          printf '/memory   zobrazí obsah global.md\n'
+          printf '/help     tento zoznam\n'
+          printf '/exit     ukončí session\n'
+          ;;
+        /exit)
+          break
+          ;;
+        *)
+          echo "Neznámy príkaz '${INPUT}'. Napíš /help."
+          ;;
+      esac
+      continue
+    fi
+
+    CONV=$(jq -n --argjson h "$CONV" --arg c "$INPUT" '$h + [{"role":"user","content":$c}]')
+    OUTPUT=$(ask "$CONV")
+
+    if [[ -z "$OUTPUT" ]]; then
+      echo "Chyba: $(jq -r '.error.message // "no output"' /tmp/ai_last_output.txt)" >&2
+      continue
+    fi
+
+    echo ""
+    echo "ai: $OUTPUT"
+    CONV=$(jq -n --argjson h "$CONV" --arg c "$OUTPUT" '$h + [{"role":"assistant","content":$c}]')
+  done
+  exit 0
+fi
+
+# ── stateless / session mode ──────────────────────────────────────────────────
+
+MESSAGES='[]'
+if [[ "$MODE" = "session" ]]; then
+  load_session
+  MESSAGES="$LOADED_MESSAGES"
+fi
+
+MESSAGES=$(jq -n --argjson h "$MESSAGES" --arg c "$PROMPT" '$h + [{"role":"user","content":$c}]')
+OUTPUT=$(ask "$MESSAGES")
+
+if [[ -z "$OUTPUT" ]]; then
+  echo "Error: $(jq -r '.error.message // "no output – see /tmp/ai_last_output.txt"' /tmp/ai_last_output.txt)" >&2
+  exit 1
+fi
+
+echo "$OUTPUT"
+
+if [[ "$MODE" = "session" ]]; then
+  save_session "$PROMPT" "$OUTPUT"
+fi

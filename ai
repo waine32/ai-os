@@ -1,6 +1,7 @@
 #!/bin/bash
 
 set -euo pipefail
+umask 077
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: ai [flash|pro] [--interactive|-i] [--session] \"prompt\"" >&2
@@ -18,6 +19,9 @@ fi
 
 if [[ "$MODE" != "interactive" ]]; then
   PROMPT="${*:-}"
+  if [[ -z "$PROMPT" && ! -t 0 ]]; then
+    PROMPT=$(cat)
+  fi
   if [[ -z "$PROMPT" ]]; then
     echo "Error: prompt is required" >&2
     exit 1
@@ -38,14 +42,78 @@ API_KEY="${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is not set}"
 TEMPERATURE="${AI_TEMPERATURE:-0}"
 CONTEXT_LIMIT="${AI_CONTEXT_LIMIT:-6000}"
 HIST_FILE="$HOME/.ai-os/sessions/history.json"
+AI_TMP="$HOME/.ai-os/tmp"
+mkdir -p "$AI_TMP"
 
-MEMORY=""
-if [[ -f ~/.ai-os/context/global.md ]]; then
-  MEMORY=$(< ~/.ai-os/context/global.md)
-fi
+# ── context file hierarchy ────────────────────────────────────────────────────
 
-SYSTEM_PROMPT="You are a deterministic CLI assistant. Always respond in Slovak language. Memory context:
-$MEMORY"
+# Auto-create default context files on first run
+_init_context_files() {
+  local ifile="$HOME/.ai-os/instructions.md"
+  local mfile="$HOME/.ai-os/memory.md"
+  mkdir -p "$HOME/.ai-os"
+  if [[ ! -f "$ifile" ]]; then
+    cat > "$ifile" << 'EOF'
+## Identity
+You are a deterministic CLI assistant.
+
+## Language
+Always respond in Slovak language.
+
+## Behavior
+Be concise and direct. Prefer structured output for complex answers.
+EOF
+  fi
+  if [[ ! -f "$mfile" ]]; then
+    cat > "$mfile" << 'EOF'
+# Memory
+
+Add facts, preferences, and ongoing context here.
+EOF
+  fi
+}
+
+# Assemble SYSTEM_PROMPT from layered context files (like Claude Code's CLAUDE.md hierarchy)
+_build_system_prompt() {
+  local instructions="" memory="" context="" ds_content="" dir
+  local -a ds_files
+  ds_files=()
+
+  if [[ -f ~/.ai-os/instructions.md ]]; then
+    instructions=$(< ~/.ai-os/instructions.md)
+  else
+    instructions="You are a deterministic CLI assistant. Always respond in Slovak language."
+  fi
+
+  [[ -f ~/.ai-os/memory.md  ]] && memory=$(< ~/.ai-os/memory.md)
+  [[ -f ~/.ai-os/context.md ]] && context=$(< ~/.ai-os/context.md)
+  # backward compat: fall back to legacy global.md
+  [[ -z "$context" && -f ~/.ai-os/context/global.md ]] && context=$(< ~/.ai-os/context/global.md)
+
+  # Walk CWD upward collecting ds.md files (parent-first so CWD is most specific)
+  dir="$PWD"
+  while [[ "$dir" != "/" ]]; do
+    [[ -f "$dir/ds.md" ]] && ds_files=("$dir/ds.md" "${ds_files[@]+"${ds_files[@]}"}")
+    dir=$(dirname "$dir")
+  done
+  if [[ ${#ds_files[@]} -gt 0 ]]; then
+    for f in "${ds_files[@]}"; do
+      ds_content+=$'\n\n'"$(< "$f")"
+    done
+  fi
+
+  local prompt="$instructions"
+  [[ -n "$memory"     ]] && prompt+=$'\n\n## Memory\n'"$memory"
+  [[ -n "$context"    ]] && prompt+=$'\n\n## Context\n'"$context"
+  [[ -n "$ds_content" ]] && prompt+=$'\n\n## Project\n'"$ds_content"
+  echo "$prompt"
+}
+
+_init_context_files
+SYSTEM_PROMPT=$(_build_system_prompt)
+
+LAST_PROMPT_TOKENS=0
+LAST_COMPLETION_TOKENS=0
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -104,27 +172,70 @@ compress_history() {
 
 # ── API call ──────────────────────────────────────────────────────────────────
 
+# ask MESSAGES [stream=false]
+# stream=false (default): returns content via stdout — use with $()
+# stream=true: streams tokens directly to stdout, saves result to $AI_TMP/last_stream.txt — call without $()
 ask() {
-  local messages="$1"
+  local messages="$1" stream="${2:-false}"
   local all_messages payload
   all_messages=$(jq -n \
     --arg    system "$SYSTEM_PROMPT" \
     --argjson msgs   "$messages" \
     '[{"role":"system","content":$system}] + $msgs')
   payload=$(jq -n \
-    --arg    model "$MODEL_NAME" \
-    --argjson msgs  "$all_messages" \
-    --argjson temp  "$TEMPERATURE" \
-    '{"model":$model,"messages":$msgs,"temperature":$temp}')
+    --arg    model   "$MODEL_NAME" \
+    --argjson msgs   "$all_messages" \
+    --argjson temp   "$TEMPERATURE" \
+    --argjson stream "$stream" \
+    '{"model":$model,"messages":$msgs,"temperature":$temp,"stream":$stream}')
 
-  local response
-  response=$(curl -s "$ENDPOINT" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $API_KEY" \
-    -d "$payload")
+  if [[ "$stream" == true ]]; then
+    local full_response="" is_sse=false raw_buf="" sse_line chunk token
+    while IFS= read -r sse_line; do
+      if [[ "$is_sse" == false && "$sse_line" != data:* && -n "$sse_line" ]]; then
+        raw_buf+="${sse_line}"$'\n'
+      fi
+      [[ "$sse_line" = "data: [DONE]" ]] && break
+      [[ "$sse_line" = data:* ]] || continue
+      is_sse=true
+      chunk="${sse_line#data: }"
+      token=$(jq -r '.choices[0].delta.content // empty' <<< "$chunk" 2>/dev/null) || continue
+      [[ -n "$token" ]] && printf '%s' "$token" && full_response+="$token"
+    done < <(curl -sN --no-buffer "$ENDPOINT" \
+      -H "Content-Type: application/json" \
+      --config <(printf 'header = "Authorization: Bearer %s"\n' "$API_KEY") \
+      -d "$payload" || true)
 
-  echo "$response" > /tmp/ai_last_output.txt
-  jq -r '.choices[0].message.content // empty' /tmp/ai_last_output.txt
+    # Fallback: non-SSE response (mock, error, or older API)
+    if [[ "$is_sse" == false && -n "$raw_buf" ]]; then
+      printf '%s' "$raw_buf" > "$AI_TMP/last_output.json"
+      local fb
+      fb=$(jq -r '.choices[0].message.content // empty' "$AI_TMP/last_output.json" 2>/dev/null)
+      if [[ -n "$fb" ]]; then
+        printf '%s' "$fb"
+        full_response="$fb"
+      else
+        LAST_PROMPT_TOKENS=0; LAST_COMPLETION_TOKENS=0
+        return 1
+      fi
+    fi
+
+    printf '\n'
+    printf '%s' "$full_response" > "$AI_TMP/last_stream.txt"
+    jq -n --arg c "$full_response" '{"choices":[{"message":{"content":$c}}]}' > "$AI_TMP/last_output.json"
+    LAST_PROMPT_TOKENS=0
+    LAST_COMPLETION_TOKENS="${#full_response}"
+  else
+    local response
+    response=$(curl -s "$ENDPOINT" \
+      -H "Content-Type: application/json" \
+      --config <(printf 'header = "Authorization: Bearer %s"\n' "$API_KEY") \
+      -d "$payload")
+    echo "$response" > "$AI_TMP/last_output.json"
+    LAST_PROMPT_TOKENS=$(jq -r '.usage.prompt_tokens // 0' "$AI_TMP/last_output.json")
+    LAST_COMPLETION_TOKENS=$(jq -r '.usage.completion_tokens // 0' "$AI_TMP/last_output.json")
+    jq -r '.choices[0].message.content // empty' "$AI_TMP/last_output.json"
+  fi
 }
 
 # ── session helpers ───────────────────────────────────────────────────────────
@@ -150,7 +261,6 @@ load_session() {
     hist="$compressed"
   fi
 
-  # Append summary to SYSTEM_PROMPT so messages array stays user/assistant only
   summary_content=$(jq -r '[.[] | select(.role=="summary") | .content] | join("\n\n")' <<< "$hist")
   if [[ -n "$summary_content" ]]; then
     SYSTEM_PROMPT="${SYSTEM_PROMPT}
@@ -181,18 +291,47 @@ if [[ "$MODE" = "interactive" ]]; then
   CONV='[]'
   PLAN_MODE=false
 
-  # Isolated readline history (does not pollute the user's ~/.bash_history)
   HISTFILE="$HOME/.ai-os/sessions/interactive_history"
   HISTSIZE=500
   HISTFILESIZE=500
   mkdir -p "$(dirname "$HISTFILE")"
   history -r "$HISTFILE" 2>/dev/null || true
 
+  # Warp OSC 133 shell integration
+  WARP=""
+  [[ "${TERM_PROGRAM:-}" == "WarpTerminal" ]] && WARP=true
+  warp_seq() { [[ -n "$WARP" ]] && printf '\033]133;%s\007' "$1"; }
+
+  # Tab completion for slash commands
+  __ai_tab() {
+    local cmds=("/status" "/reset" "/compact" "/plan" "/batch " "/save " "/load "
+                 "/model " "/memory" "/clear" "/help" "/exit")
+    local cur="$READLINE_LINE"
+    [[ "$cur" != /* ]] && return
+    local matches=()
+    for c in "${cmds[@]}"; do
+      [[ "$c" = "$cur"* ]] && matches+=("$c")
+    done
+    if [[ ${#matches[@]} -eq 1 ]]; then
+      READLINE_LINE="${matches[0]}"
+      READLINE_POINT=${#READLINE_LINE}
+    elif [[ ${#matches[@]} -gt 1 ]]; then
+      printf '\n%s\n' "${matches[*]}"
+      READLINE_LINE="$cur"
+      READLINE_POINT=${#READLINE_LINE}
+    fi
+  }
+  bind -x '"\t": __ai_tab' 2>/dev/null || true
+
   echo "AI-OS  •  $MODEL  •  /help pre príkazy  •  Ctrl+C na ukončenie"
   echo "────────────────────────────────────────────────────────────────"
   while true; do
-    read -er -p $'\nty: ' INPUT || break
+    warp_seq A
+    read -er -p $'\n> ' INPUT || break
+    warp_seq C
     [[ "$INPUT" = "exit" || "$INPUT" = "quit" || -z "$INPUT" ]] && break
+
+    history -s "$INPUT"
 
     if [[ "$INPUT" = /* ]]; then
       case "$INPUT" in
@@ -200,20 +339,24 @@ if [[ "$MODE" = "interactive" ]]; then
           MSG_COUNT=$(jq 'length' <<< "$CONV")
           CONV_TOKENS=$(estimate_tokens "$CONV")
           MEM_SIZE=0
-          [[ -f ~/.ai-os/context/global.md ]] && MEM_SIZE=$(wc -c < ~/.ai-os/context/global.md | tr -d ' ')
-          printf 'model:          %s\ntemperature:    %s\nmessages:       %s\nestim. tokens:  %s\nmemory:         %s B\n' \
-            "$MODEL_NAME" "$TEMPERATURE" "$MSG_COUNT" "$CONV_TOKENS" "$MEM_SIZE"
+          [[ -f ~/.ai-os/memory.md ]] && MEM_SIZE=$(wc -c < ~/.ai-os/memory.md | tr -d ' ')
+          printf 'model:              %s\ntemperature:        %s\nmessages:           %s\nestim. tokens:      %s\nprompt_tokens:      %s\ncompletion_tokens:  %s\nmemory:             %s B\n' \
+            "$MODEL_NAME" "$TEMPERATURE" "$MSG_COUNT" "$CONV_TOKENS" "$LAST_PROMPT_TOKENS" "$LAST_COMPLETION_TOKENS" "$MEM_SIZE"
           ;;
         /reset)
           CONV='[]'
           echo "História konverzácie vymazaná."
           ;;
         /memory)
-          if [[ -f ~/.ai-os/context/global.md ]]; then
-            cat ~/.ai-os/context/global.md
-          else
-            echo "(súbor neexistuje: ~/.ai-os/context/global.md)"
-          fi
+          local_shown=0
+          for local_f in ~/.ai-os/instructions.md ~/.ai-os/memory.md ~/.ai-os/context.md ~/.ai-os/context/global.md; do
+            if [[ -f "$local_f" ]]; then
+              printf '\n── %s ──\n' "$local_f"
+              cat "$local_f"
+              local_shown=1
+            fi
+          done
+          [[ "$local_shown" -eq 0 ]] && echo "(žiadne kontextové súbory nenájdené)"
           ;;
         /clear)
           printf '\033[2J\033[H'
@@ -243,24 +386,34 @@ if [[ "$MODE" = "interactive" ]]; then
           if [[ -z "$local_file" || ! -f "$local_file" ]]; then
             echo "Použitie: /batch <súbor>  (každý riadok = jeden prompt)"
           else
-            while IFS= read -r local_line; do
-              [[ -z "$local_line" || "$local_line" = "#"* ]] && continue
-              printf '\n>>> %s\n' "$local_line"
-              CONV=$(jq -n --argjson h "$CONV" --arg c "$local_line" '$h + [{"role":"user","content":$c}]')
-              local_out=$(ask "$CONV")
-              if [[ -z "$local_out" ]]; then
-                echo "Chyba API pri '$local_line'" >&2
-              else
-                printf '\nai: %s\n' "$local_out"
-                CONV=$(jq -n --argjson h "$CONV" --arg c "$local_out" '$h + [{"role":"assistant","content":$c}]')
-              fi
-            done < "$local_file"
+            # Security: restrict batch to files within user's home directory
+            local_file=$(realpath -m "$local_file" 2>/dev/null || echo "$local_file")
+            if [[ "$local_file" != "$HOME"* ]]; then
+              echo "Chyba: /batch povolený len v rámci domovského adresára." >&2
+            else
+              while IFS= read -r local_line; do
+                [[ -z "$local_line" || "$local_line" = "#"* ]] && continue
+                printf '\n>>> %s\n' "$local_line"
+                CONV=$(jq -n --argjson h "$CONV" --arg c "$local_line" '$h + [{"role":"user","content":$c}]')
+                printf '\nai: '
+                ask "$CONV" true || { echo "Chyba API pri '$local_line'" >&2; continue; }
+                local_out=$(< "$AI_TMP/last_stream.txt")
+                if [[ -z "$local_out" ]]; then
+                  echo "Chyba API pri '$local_line'" >&2
+                else
+                  CONV=$(jq -n --argjson h "$CONV" --arg c "$local_out" '$h + [{"role":"assistant","content":$c}]')
+                fi
+              done < "$local_file"
+            fi
           fi
           ;;
         /save*)
           local_name="${INPUT#/save}"
           local_name="${local_name# }"
           local_name="${local_name:-default}"
+          # Security: strip path traversal characters — allow only [a-zA-Z0-9_-]
+          local_name="${local_name//[^a-zA-Z0-9_-]/}"
+          [[ -z "$local_name" ]] && local_name="default"
           mkdir -p "$HOME/.ai-os/sessions/named"
           echo "$CONV" > "$HOME/.ai-os/sessions/named/${local_name}.json"
           echo "Session uložená: $local_name"
@@ -269,6 +422,9 @@ if [[ "$MODE" = "interactive" ]]; then
           local_name="${INPUT#/load}"
           local_name="${local_name# }"
           local_name="${local_name:-default}"
+          # Security: strip path traversal characters — allow only [a-zA-Z0-9_-]
+          local_name="${local_name//[^a-zA-Z0-9_-]/}"
+          [[ -z "$local_name" ]] && local_name="default"
           local_f="$HOME/.ai-os/sessions/named/${local_name}.json"
           if [[ -f "$local_f" ]]; then
             CONV=$(< "$local_f")
@@ -286,7 +442,7 @@ if [[ "$MODE" = "interactive" ]]; then
           printf '/save [meno]     uloží konverzáciu do named session\n'
           printf '/load [meno]     načíta named session\n'
           printf '/model [flash|pro]  prepne model\n'
-          printf '/memory          zobrazí obsah global.md\n'
+          printf '/memory          zobrazí kontextové súbory (instructions, memory, context)\n'
           printf '/clear           vymaže obrazovku\n'
           printf '/help            tento zoznam\n'
           printf '/exit            ukončí session\n'
@@ -298,6 +454,7 @@ if [[ "$MODE" = "interactive" ]]; then
           echo "Neznámy príkaz '${INPUT}'. Napíš /help."
           ;;
       esac
+      warp_seq "D;0"
       continue
     fi
 
@@ -307,17 +464,20 @@ if [[ "$MODE" = "interactive" ]]; then
       PLAN_MODE=false
     fi
 
-    history -s "$INPUT"
     CONV=$(jq -n --argjson h "$CONV" --arg c "$INPUT" '$h + [{"role":"user","content":$c}]')
-    OUTPUT=$(ask "$CONV")
-
+    printf '\nai: '
+    ask "$CONV" true || {
+      printf '\nChyba: %s\n' "$(jq -r '.error.message // "no output"' "$AI_TMP/last_output.json")" >&2
+      warp_seq "D;1"
+      continue
+    }
+    OUTPUT=$(< "$AI_TMP/last_stream.txt")
     if [[ -z "$OUTPUT" ]]; then
-      echo "Chyba: $(jq -r '.error.message // "no output"' /tmp/ai_last_output.txt)" >&2
+      printf '\nChyba: žiadna odpoveď\n' >&2
+      warp_seq "D;1"
       continue
     fi
-
-    echo ""
-    echo "ai: $OUTPUT"
+    warp_seq "D;0"
     CONV=$(jq -n --argjson h "$CONV" --arg c "$OUTPUT" '$h + [{"role":"assistant","content":$c}]')
   done
 
@@ -334,14 +494,17 @@ if [[ "$MODE" = "session" ]]; then
 fi
 
 MESSAGES=$(jq -n --argjson h "$MESSAGES" --arg c "$PROMPT" '$h + [{"role":"user","content":$c}]')
-OUTPUT=$(ask "$MESSAGES")
 
-if [[ -z "$OUTPUT" ]]; then
-  echo "Error: $(jq -r '.error.message // "no output – see /tmp/ai_last_output.txt"' /tmp/ai_last_output.txt)" >&2
+if ! ask "$MESSAGES" true; then
+  echo "Error: $(jq -r '.error.message // "no output – see ~/.ai-os/tmp/last_output.json"' "$AI_TMP/last_output.json")" >&2
   exit 1
 fi
 
-echo "$OUTPUT"
+OUTPUT=$(< "$AI_TMP/last_stream.txt")
+if [[ -z "$OUTPUT" ]]; then
+  echo "Error: no output – see ~/.ai-os/tmp/last_output.json" >&2
+  exit 1
+fi
 
 if [[ "$MODE" = "session" ]]; then
   save_session "$PROMPT" "$OUTPUT"

@@ -48,7 +48,10 @@ teardown() {
   unset AI_TEMPERATURE
   unset AI_CONTEXT_LIMIT
   unset MOCK_CURL_RESPONSE
+  unset TERM_PROGRAM
   rm -f /tmp/ai_last_output.txt
+  rm -f /tmp/ai_last_stream.txt
+  rm -rf "$HOME/.ai-os/tmp"
 }
 
 @test "no arguments exits with usage message" {
@@ -421,4 +424,99 @@ MOCKCURL
   run bash -c "printf 'msg1\nmsg2\n/compact\nexit\n' | '$AI_SCRIPT' flash --interactive"
   [ "$status" -eq 0 ]
   [[ "$output" == *"komprimovaná"* ]]
+}
+
+@test "pipe input succeeds and outputs response" {
+  run bash -c "echo 'pipe input test' | '$AI_SCRIPT' flash"
+  [ "$status" -eq 0 ]
+  [ "$output" = "test response" ]
+}
+
+@test "/status shows prompt_tokens and completion_tokens" {
+  export MOCK_CURL_RESPONSE='{"choices":[{"message":{"content":"resp"}}]}'
+  run bash -c "printf 'hello\n/status\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"prompt_tokens"* ]]
+  [[ "$output" == *"completion_tokens"* ]]
+}
+
+@test "streaming SSE assembles tokens correctly" {
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+printf 'data: {"choices":[{"delta":{"content":"hello "}}]}\n'
+printf 'data: {"choices":[{"delta":{"content":"world"}}]}\n'
+printf 'data: [DONE]\n'
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+
+  run "$AI_SCRIPT" flash "test"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"hello world"* ]]
+}
+
+@test "slash command is saved to interactive history" {
+  rm -f "$HOME/.ai-os/sessions/interactive_history"
+  run bash -c "printf '/reset\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/.ai-os/sessions/interactive_history" ]
+  grep -q '/reset' "$HOME/.ai-os/sessions/interactive_history"
+}
+
+@test "Warp OSC 133 sequences are emitted when TERM_PROGRAM=WarpTerminal" {
+  run bash -c "export TERM_PROGRAM=WarpTerminal; printf 'exit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\033]133;A\007'* ]]
+}
+
+@test "interactive prompt uses > not ty:" {
+  run bash -c "printf 'exit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"ty:"* ]]
+}
+
+@test "ds.md loaded from CWD into system prompt" {
+  # payload-capture mock
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then
+    echo "$arg" > /tmp/curl_payload.json
+    found_d=0
+  fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+if [[ -n "${MOCK_CURL_RESPONSE:-}" ]]; then
+  echo "$MOCK_CURL_RESPONSE"
+else
+  echo '{"choices":[{"message":{"content":"test response"}}]}'
+fi
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+
+  echo "# test project context" > "$HOME/ds.md"
+  rm -f /tmp/curl_payload.json
+
+  # Run from HOME so ds.md is found
+  run bash -c "cd '$HOME' && '$AI_SCRIPT' flash 'hello'"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"test project context"* ]]
+
+  rm -f "$HOME/ds.md"
+}
+
+@test "/save strips path traversal characters" {
+  run bash -c "printf '/save ../../evil\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  # The traversal chars are stripped, so it saves as "evil" not "../../evil"
+  [ -f "$HOME/.ai-os/sessions/named/evil.json" ]
+  [ ! -f "$HOME/../../evil.json" ]
+}
+
+@test "temp files are created in ~/.ai-os/tmp/ not /tmp" {
+  run "$AI_SCRIPT" flash "test"
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/.ai-os/tmp/last_output.json" ]
+  [ -f "$HOME/.ai-os/tmp/last_stream.txt" ]
 }

@@ -1004,3 +1004,60 @@ MOCKCURL
   # file should still exist (not cleared)
   [ -f "$HOME/.ai-os/current-project" ]
 }
+
+@test "e2e: /plan correctly handles large multiline prompt piped from file" {
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then
+    echo "$arg" > /tmp/curl_payload.json
+    found_d=0
+  fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+echo '{"choices":[{"message":{"content":"ok"}}]}'
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+  rm -f /tmp/curl_payload.json
+
+  local prompt_file="/Users/martinzuzic/Desktop/Prompt.txt"
+  run bash -c "{ printf '/plan\n'; cat '$prompt_file'; printf '\n.\nexit\n'; } | '$AI_SCRIPT' flash --interactive"
+
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  local payload
+  payload=$(< /tmp/curl_payload.json)
+  [[ "$payload" == *"step-by-step plan"* ]]
+  [[ "$payload" == *"TASK-001"* ]]
+  [[ "$payload" == *"TASK-025"* ]]
+}
+
+@test "/plan with file path loads file content as plan input" {
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then
+    echo "$arg" > /tmp/curl_payload.json
+    found_d=0
+  fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+echo '{"choices":[{"message":{"content":"ok"}}]}'
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+  rm -f /tmp/curl_payload.json
+
+  local tmpfile
+  tmpfile=$(mktemp)
+  printf 'design a REST API for users\n' > "$tmpfile"
+
+  run bash -c "printf '/plan $tmpfile\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  rm -f "$tmpfile"
+
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"design a REST API"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"step-by-step plan"* ]]
+}

@@ -1016,6 +1016,9 @@ WSDSEOF
           if [[ -n "$local_plan_arg" ]]; then
             if [[ -f "$local_plan_arg" && -r "$local_plan_arg" ]]; then
               local_plan_arg=$(< "$local_plan_arg")
+            elif [[ "$local_plan_arg" == *$'\n'* ]]; then
+              printf 'Hint: viacradkový vstup zachytený (readline redraw je normálny).\n'
+              printf 'Pre veľké prompty odporúčam: /plan <súbor>  alebo  /plan → paste → .\n'
             fi
             INPUT="$local_plan_arg"
             PLAN_MODE=true

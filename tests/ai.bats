@@ -457,6 +457,29 @@ MOCKCURL
   [[ "$payload" == *"body text"* ]]
 }
 
+@test "/plan multiline strips bracketed-paste markers from piped input" {
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then
+    echo "$arg" > /tmp/curl_payload.json
+    found_d=0
+  fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+echo '{"choices":[{"message":{"content":"ok"}}]}'
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+  rm -f /tmp/curl_payload.json
+
+  run bash -c "printf '/plan\n\033[200~line one\nline two\n\033[201~\n.\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"line one"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"line two"* ]]
+}
+
 @test "/batch with a temp file" {
   local tmpfile=$(mktemp)
   printf 'first prompt\nsecond prompt\n' > "$tmpfile"

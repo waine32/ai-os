@@ -996,7 +996,7 @@ WSDSEOF
           # Multiline mode: collect lines until lone '.'
           printf 'Plánovací mód (ukonči riadkom obsahujúcim len .)\n'
           local_plan_buf=""
-          while IFS= read -er local_plan_line; do
+          while IFS= read -r local_plan_line; do
             # Defensive strip of bracketed-paste markers
             local_plan_line="${local_plan_line#$'\e[200~'}"
             local_plan_line="${local_plan_line%$'\e[201~'}"

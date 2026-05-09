@@ -1075,3 +1075,110 @@ MOCKCURL
   [[ "$(< /tmp/curl_payload.json)" == *"design a REST API"* ]]
   [[ "$(< /tmp/curl_payload.json)" == *"step-by-step plan"* ]]
 }
+
+# ── Context file loading tests ───────────────────────────────────────────────
+
+_payload_capture_mock() {
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+found_d=0
+for arg in "$@"; do
+  if [[ "$found_d" == "1" ]]; then echo "$arg" > /tmp/curl_payload.json; found_d=0; fi
+  [[ "$arg" == "-d" ]] && found_d=1
+done
+echo '{"choices":[{"message":{"content":"ok"}}]}'
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+  rm -f /tmp/curl_payload.json
+}
+
+@test "global instructions.md is loaded into system prompt" {
+  _payload_capture_mock
+  mkdir -p "$HOME/.ai-os"
+  echo "GLOBAL_INSTR_MARKER" > "$HOME/.ai-os/instructions.md"
+
+  run "$AI_SCRIPT" flash "hello"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"GLOBAL_INSTR_MARKER"* ]]
+}
+
+@test "global memory.md is loaded under ## Memory section" {
+  _payload_capture_mock
+  mkdir -p "$HOME/.ai-os"
+  echo "GLOBAL_MEM_MARKER" > "$HOME/.ai-os/memory.md"
+
+  run "$AI_SCRIPT" flash "hello"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"## Memory"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"GLOBAL_MEM_MARKER"* ]]
+}
+
+@test "global context.md is loaded under ## Context section" {
+  _payload_capture_mock
+  mkdir -p "$HOME/.ai-os"
+  echo "GLOBAL_CTX_MARKER" > "$HOME/.ai-os/context.md"
+
+  run "$AI_SCRIPT" flash "hello"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"## Context"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"GLOBAL_CTX_MARKER"* ]]
+}
+
+@test "workspace ds.md is loaded under ## Workspace section" {
+  _payload_capture_mock
+  local ws_dir="$HOME/ws_test"
+  mkdir -p "$ws_dir"
+  echo "WS_META_MARKER" > "$ws_dir/ds.md"
+  printf '%s\n' "$ws_dir" > "$HOME/.ai-os/workspace"
+
+  run "$AI_SCRIPT" flash "hello"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"## Workspace"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"WS_META_MARKER"* ]]
+}
+
+@test "workspace memory/instructions.md is loaded under ## Workspace Instructions" {
+  _payload_capture_mock
+  local ws_dir="$HOME/ws_test"
+  mkdir -p "$ws_dir/memory"
+  echo "WS_INSTR_MARKER" > "$ws_dir/memory/instructions.md"
+  printf '%s\n' "$ws_dir" > "$HOME/.ai-os/workspace"
+
+  run "$AI_SCRIPT" flash "hello"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"## Workspace Instructions"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"WS_INSTR_MARKER"* ]]
+}
+
+@test "workspace memory/memory.md is loaded under ## Workspace Memory" {
+  _payload_capture_mock
+  local ws_dir="$HOME/ws_test"
+  mkdir -p "$ws_dir/memory"
+  echo "WS_MEM_MARKER" > "$ws_dir/memory/memory.md"
+  printf '%s\n' "$ws_dir" > "$HOME/.ai-os/workspace"
+
+  run "$AI_SCRIPT" flash "hello"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"## Workspace Memory"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"WS_MEM_MARKER"* ]]
+}
+
+@test "workspace memory/context.md is loaded under ## Workspace Context" {
+  _payload_capture_mock
+  local ws_dir="$HOME/ws_test"
+  mkdir -p "$ws_dir/memory"
+  echo "WS_CTX_MARKER" > "$ws_dir/memory/context.md"
+  printf '%s\n' "$ws_dir" > "$HOME/.ai-os/workspace"
+
+  run "$AI_SCRIPT" flash "hello"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"## Workspace Context"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"WS_CTX_MARKER"* ]]
+}

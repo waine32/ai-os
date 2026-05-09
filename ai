@@ -147,7 +147,7 @@ _build_system_prompt() {
   # Workspace context layer (between global context and project ds.md)
   if [[ -f ~/.ai-os/workspace ]]; then
     local _ws; _ws=$(< ~/.ai-os/workspace); _ws="${_ws%$'\n'}"
-    if [[ "$_ws" = "$HOME"* ]]; then
+    if [[ -d "$_ws" ]]; then
       [[ -f "$_ws/ds.md"                  ]] && ws_meta=$(< "$_ws/ds.md")
       [[ -f "$_ws/memory/instructions.md" ]] && ws_instr=$(< "$_ws/memory/instructions.md")
       [[ -f "$_ws/memory/memory.md"       ]] && ws_mem=$(< "$_ws/memory/memory.md")

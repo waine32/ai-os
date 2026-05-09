@@ -903,6 +903,7 @@ PROJCTX
                 local_list_found=0
                 while IFS= read -r local_list_pd; do
                   [[ -z "$local_list_pd" ]] && continue
+                  [[ "$(basename "$local_list_pd")" == "memory" ]] && continue
                   if [[ "$local_list_pd" = "$local_list_cur" ]]; then
                     printf '  ▶ %s\n' "$(basename "$local_list_pd")"
                   else

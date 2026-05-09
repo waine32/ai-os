@@ -1004,6 +1004,7 @@ MOCKCURL
   [ "$status" -eq 0 ]
   [[ "$output" == *"alpha"* ]]
   [[ "$output" == *"beta"* ]]
+  [[ "$output" != *"memory"* ]]
 
   rm -rf "$ws_dir"
   rm -f "$HOME/.ai-os/workspace"

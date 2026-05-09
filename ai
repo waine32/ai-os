@@ -409,17 +409,21 @@ run_agentic() {
   done
 
   printf '[pro: concluding...]\n' >&2
-  ask "$messages" false
+  ask "$messages" false >/dev/null
   local final_content
   final_content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
   printf '%s\n' "$final_content"
   printf '%s' "$final_content" > "$AI_TMP/last_stream.txt"
 }
 
+# no-op stub — overridden in interactive mode to clear the animation
+_stop_spinner() { :; }
+
 # _exec_shell_tool CMD [REASON] — shows command, asks user confirmation, executes
 # Returns command output to stdout; safe default (no) when /dev/tty unavailable.
 _exec_shell_tool() {
   local _cmd="$1" _reason="${2:-}"
+  _stop_spinner  # clear spinner before user interaction (no-op if not running)
   [[ -n "$_reason" ]] \
     && printf '\n[shell] %s  # %s\n' "$_cmd" "$_reason" >&2 \
     || printf '\n[shell] %s\n' "$_cmd" >&2
@@ -446,6 +450,7 @@ run_interactive_flash() {
     _finish=$(jq -r '.choices[0].finish_reason // "stop"' < "$AI_TMP/last_output.json")
 
     if [[ "$_finish" != "tool_calls" ]]; then
+      _stop_spinner
       _content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
       printf '%s\n' "$_content"
       printf '%s' "$_content" > "$AI_TMP/last_stream.txt"
@@ -484,6 +489,7 @@ run_interactive_flash() {
   done
 
   # Max iterations reached — final call without tools
+  _stop_spinner
   ask "$_msgs" false >/dev/null
   _content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
   printf '%s\n' "$_content"
@@ -575,6 +581,30 @@ if [[ "$MODE" = "interactive" ]]; then
       kill "$_ESC_PID" 2>/dev/null || true
       wait "$_ESC_PID" 2>/dev/null || true
       _ESC_PID=""
+    fi
+    # read -r -s in the subshell disables terminal echo; restore it on kill
+    stty echo 2>/dev/null || true
+  }
+
+  _SPINNER_PID=""
+  _start_spinner() {
+    (
+      local frames=('|' '/' '-' '\')
+      local i=0
+      while true; do
+        printf '%s\b' "${frames[$i]}" >&2
+        i=$(( (i+1) % 4 ))
+        sleep 0.12
+      done
+    ) &
+    _SPINNER_PID=$!
+  }
+  _stop_spinner() {
+    if [[ -n "$_SPINNER_PID" ]]; then
+      kill "$_SPINNER_PID" 2>/dev/null || true
+      wait "$_SPINNER_PID" 2>/dev/null || true
+      _SPINNER_PID=""
+      printf ' \b' >&2  # overwrite last spinner char, cursor stays in place
     fi
   }
 
@@ -1133,7 +1163,9 @@ WSDSEOF
     if [[ "$MODEL" == "pro" ]]; then
       run_agentic "$CONV" && _ask_ok=1 || true
     else
+      _start_spinner
       run_interactive_flash "$CONV" && _ask_ok=1 || true
+      _stop_spinner  # safety — if not already stopped inside run_interactive_flash
     fi
 
     _stop_esc_monitor

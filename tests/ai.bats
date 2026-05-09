@@ -331,6 +331,20 @@ MOCKCURL
   [ -f "$HOME/.ai-os/sessions/interactive_history" ]
 }
 
+@test "flash interactive: response is printed exactly once" {
+  cat > "$MOCK_BIN/curl" << 'MOCKCURL'
+#!/bin/bash
+echo '{"choices":[{"message":{"content":"unique-marker-xyz"}}]}'
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+
+  run bash -c "printf 'hello\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  local count
+  count=$(printf '%s' "$output" | grep -c "unique-marker-xyz" || true)
+  [ "$count" -eq 1 ]
+}
+
 @test "/clear does not crash" {
   run bash -c "printf '/clear\nexit\n' | '$AI_SCRIPT' flash --interactive"
   [ "$status" -eq 0 ]

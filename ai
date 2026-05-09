@@ -442,7 +442,7 @@ run_interactive_flash() {
   local _call_id _func_name _func_args _tool_result _shell_cmd _shell_reason
 
   while [[ $_iter -lt $_max_iter ]]; do
-    ask "$_msgs" false "$SHELL_TOOL"
+    ask "$_msgs" false "$SHELL_TOOL" >/dev/null
     _finish=$(jq -r '.choices[0].finish_reason // "stop"' < "$AI_TMP/last_output.json")
 
     if [[ "$_finish" != "tool_calls" ]]; then
@@ -484,7 +484,7 @@ run_interactive_flash() {
   done
 
   # Max iterations reached — final call without tools
-  ask "$_msgs" false
+  ask "$_msgs" false >/dev/null
   _content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
   printf '%s\n' "$_content"
   printf '%s' "$_content" > "$AI_TMP/last_stream.txt"

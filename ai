@@ -653,10 +653,17 @@ if [[ "$MODE" = "interactive" ]]; then
 
   echo "AI-OS  •  $MODEL  •  /help pre príkazy  •  Ctrl+C na ukončenie"
   echo "────────────────────────────────────────────────────────────────"
-  trap '' INT  # Ignore INT at prompt — prevents stale signals from killing the loop
+  trap 'true' INT  # not '' — readline needs non-SIG_IGN to install its SIGINT handler
   while true; do
     warp_seq A
-    read -er -p $'\n> ' INPUT || break
+    local_read_rc=0
+    IFS= read -er -p $'\n> ' INPUT || local_read_rc=$?
+    if [[ "$local_read_rc" -eq 130 ]]; then
+      printf '\n'
+      continue
+    elif [[ "$local_read_rc" -ne 0 ]]; then
+      break
+    fi
     warp_seq C
     [[ "$INPUT" = "exit" || "$INPUT" = "quit" || -z "$INPUT" ]] && break
 
@@ -1130,7 +1137,7 @@ WSDSEOF
     fi
 
     _stop_esc_monitor
-    trap '' INT  # Back to ignore — protects next read -er from stale signals
+    trap 'true' INT  # restore — readline needs non-SIG_IGN before next read -er
 
     if [[ "$_AI_INTERRUPTED" -eq 1 && "$_ask_ok" -eq 0 ]]; then
       printf '\n[prerušené]\n'

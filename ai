@@ -653,6 +653,7 @@ if [[ "$MODE" = "interactive" ]]; then
 
   echo "AI-OS  •  $MODEL  •  /help pre príkazy  •  Ctrl+C na ukončenie"
   echo "────────────────────────────────────────────────────────────────"
+  trap '' INT  # Ignore INT at prompt — prevents stale signals from killing the loop
   while true; do
     warp_seq A
     read -er -p $'\n> ' INPUT || break
@@ -1128,10 +1129,10 @@ WSDSEOF
       run_interactive_flash "$CONV" && _ask_ok=1 || true
     fi
 
-    trap - INT
     _stop_esc_monitor
+    trap '' INT  # Back to ignore — protects next read -er from stale signals
 
-    if [[ "$_AI_INTERRUPTED" -eq 1 ]]; then
+    if [[ "$_AI_INTERRUPTED" -eq 1 && "$_ask_ok" -eq 0 ]]; then
       printf '\n[prerušené]\n'
       CONV=$(jq '.[:-1]' <<< "$CONV")
       warp_seq "D;1"

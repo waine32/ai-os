@@ -925,14 +925,11 @@ PROJCTX
             else
               local_ws_path="$PWD/$local_ws_arg"
             fi
-            if [[ "$local_ws_path" != "$HOME"* ]]; then
-              echo "Chyba: workspace musí byť v rámci domovského adresára." >&2
-            else
-              mkdir -p "$local_ws_path/memory"
-              printf '%s\n' "$local_ws_path" > ~/.ai-os/workspace
-              # ds.md in workspace root
-              if [[ ! -f "$local_ws_path/ds.md" ]]; then
-                cat > "$local_ws_path/ds.md" << 'WSDSEOF'
+            mkdir -p "$local_ws_path/memory"
+            printf '%s\n' "$local_ws_path" > ~/.ai-os/workspace
+            # ds.md in workspace root
+            if [[ ! -f "$local_ws_path/ds.md" ]]; then
+              cat > "$local_ws_path/ds.md" << 'WSDSEOF'
 # Workspace — sprievodca globálnymi súbormi
 
 - `memory/instructions.md` — pravidlá správania, jazyk, tón pre tento workspace
@@ -941,37 +938,36 @@ PROJCTX
 
 Tento súbor je načítaný automaticky pri každom štarte. Nemazať.
 WSDSEOF
-                echo "  ✓ ds.md"
-              fi
-              # memory/instructions.md
-              if [[ ! -f "$local_ws_path/memory/instructions.md" ]]; then
-                printf '## Identity\n\n## Language\n\n## Behavior\n' \
-                  > "$local_ws_path/memory/instructions.md"
-                echo "  ✓ memory/instructions.md"
-              fi
-              # memory/memory.md
-              if [[ ! -f "$local_ws_path/memory/memory.md" ]]; then
-                printf '# Memory\n' > "$local_ws_path/memory/memory.md"
-                echo "  ✓ memory/memory.md"
-              fi
-              # memory/context.md
-              if [[ ! -f "$local_ws_path/memory/context.md" ]]; then
-                printf '# Aktívny kontext\n' > "$local_ws_path/memory/context.md"
-                echo "  ✓ memory/context.md"
-              fi
-              echo "Workspace nastavený: $local_ws_path"
-              for local_ws_f in "$local_ws_path/ds.md" \
-                                 "$local_ws_path/memory/instructions.md" \
-                                 "$local_ws_path/memory/memory.md" \
-                                 "$local_ws_path/memory/context.md"; do
-                printf 'Upraviť %s? [y/N] ' "${local_ws_f#$local_ws_path/}"
-                local_ws_ans=""
-                IFS= read -r local_ws_ans || local_ws_ans="n"
-                if [[ "$local_ws_ans" =~ ^[Yy]$ ]]; then
-                  ${EDITOR:-nano} "$local_ws_f" </dev/tty >/dev/tty 2>/dev/tty || true
-                fi
-              done
+              echo "  ✓ ds.md"
             fi
+            # memory/instructions.md
+            if [[ ! -f "$local_ws_path/memory/instructions.md" ]]; then
+              printf '## Identity\n\n## Language\n\n## Behavior\n' \
+                > "$local_ws_path/memory/instructions.md"
+              echo "  ✓ memory/instructions.md"
+            fi
+            # memory/memory.md
+            if [[ ! -f "$local_ws_path/memory/memory.md" ]]; then
+              printf '# Memory\n' > "$local_ws_path/memory/memory.md"
+              echo "  ✓ memory/memory.md"
+            fi
+            # memory/context.md
+            if [[ ! -f "$local_ws_path/memory/context.md" ]]; then
+              printf '# Aktívny kontext\n' > "$local_ws_path/memory/context.md"
+              echo "  ✓ memory/context.md"
+            fi
+            echo "Workspace nastavený: $local_ws_path"
+            for local_ws_f in "$local_ws_path/ds.md" \
+                               "$local_ws_path/memory/instructions.md" \
+                               "$local_ws_path/memory/memory.md" \
+                               "$local_ws_path/memory/context.md"; do
+              printf 'Upraviť %s? [y/N] ' "${local_ws_f#$local_ws_path/}"
+              local_ws_ans=""
+              IFS= read -r local_ws_ans || local_ws_ans="n"
+              if [[ "$local_ws_ans" =~ ^[Yy]$ ]]; then
+                ${EDITOR:-nano} "$local_ws_f" </dev/tty >/dev/tty 2>/dev/tty || true
+              fi
+            done
           fi
           ;;
         /clear)

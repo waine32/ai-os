@@ -1,149 +1,196 @@
 # AI-OS
 
-A minimal bash CLI that routes prompts to DeepSeek AI models via direct API calls. No frameworks, no dependencies beyond curl and jq. Single executable `ai` at repo root.
-
-## Requirements
-
-- `curl`
-- `jq`
-- `git`
-- `DEEPSEEK_API_KEY` environment variable
-
-## Installation
-
-Clone the repository:
+Minimalistický bash CLI router pre DeepSeek API. Interaktívny agent s tool layer-om, context hierarchiou a approval loop-om — v jedinom bash skripte bez frameworkov.
 
 ```bash
-git clone <repo-url>
+ai flash "Vysvetli git rebase"
+ai flash -i          # interaktívny mód
+ai pro "Refaktoruj:  $(cat main.py)"
+```
+
+---
+
+## Požiadavky
+
+- **bash 5+** (macOS: `brew install bash`)
+- **jq** (`brew install jq`)
+- **curl**
+- **DeepSeek API kľúč** — [platform.deepseek.com](https://platform.deepseek.com)
+
+---
+
+## Inštalácia
+
+```bash
+git clone https://github.com/waine32/clipboard-intelligence ai-os
 cd ai-os
+chmod +x ai
+./setup.sh                         # vytvorí ~/.ai-os/ štruktúru
+export DEEPSEEK_API_KEY="sk-..."   # pridaj do ~/.zshrc
 ```
 
-Run the setup script:
-
-```bash
-./setup.sh
-```
-
-Or manually add the repo to your PATH:
-
+Voliteľne pridaj do `PATH`:
 ```bash
 export PATH="$PATH:/path/to/ai-os"
 ```
 
-## Usage
+---
 
-### Stateless
-
-Execute a prompt without saving history:
+## Použitie
 
 ```bash
-ai flash "What is the capital of France?"
-ai pro "Explain quantum computing in detail"
+ai flash "prompt"           # jednorazový prompt (streaming)
+ai pro   "prompt"           # pro model (agentic, deleguje na flash)
+ai flash -i                 # interaktívny mód
+ai flash -s "prompt"        # session mód (história sa ukladá)
+echo "text" | ai flash      # pipe input
+cat file.txt | ai flash "zhrň:"
 ```
 
-### Session mode
+---
 
-Append prompts and responses to a persistent history file:
+## Modely
 
-```bash
-ai flash --session "First question"
-ai flash --session "Follow-up question"
+| Model | Príkaz | Popis |
+|-------|--------|-------|
+| **Flash** | `ai flash` | Rýchly, cost-effective. Streaming výstup. |
+| **Pro** | `ai pro` | Agentic loop — deleguje subtasky na Flash, volá shell nástroje. |
+
+Pro označuje svoju prácu v stderr:
+```
+[pro...]            — Pro rozmýšľa
+[→ flash: dôvod]   — Deleguje na Flash
+[← pro]            — Vrátil sa z Flash
+[pro: concluding…] — Finálna odpoveď
 ```
 
-Responses are stored in `~/.ai-os/sessions/history.json`.
+---
 
-### Interactive mode
-
-Start an interactive conversation:
+## Interaktívny mód — príkazy
 
 ```bash
 ai flash -i
-ai flash --interactive
 ```
 
-- Up/down arrow keys recall previous prompts
-- ESC interrupts the current streaming response without exiting
-- History is persisted to `~/.ai-os/sessions/interactive_history`
+| Príkaz | Popis |
+|--------|-------|
+| `!<príkaz>` | Shell passthrough — model obídený, tokeny ušetrené |
+| `/status` | Model, teplota, správy, tokeny, pamäť |
+| `/model [flash\|pro]` | Prepne model |
+| `/auto [on\|safe\|off]` | Approval loop pre shell príkazy |
+| `/plan` | Ďalšia správa → výstup ako štruktúrovaný plán |
+| `/plan <súbor>` | Načíta súbor ako vstup pre plán |
+| `/compact` | Komprimuje históriu konverzácie |
+| `/reset` | Vymaže históriu session |
+| `/save [meno]` | Uloží konverzáciu |
+| `/load [meno]` | Načíta uloženú konverzáciu |
+| `/batch <súbor>` | Spustí prompty zo súboru sekvenčne |
+| `/memory` | Zobrazí všetky kontext vrstvy |
+| `/memory add <text>` | Rýchly zápis do `~/.ai-os/memory.md` |
+| `/memory edit [kľúč]` | Otvorí kontext súbor v editore |
+| `/workspace <cesta>` | Nastaví workspace |
+| `/project [sub]` | Správa projektov (`new`, `list`, `set`, `clear`) |
+| `/clear` | Vymaže obrazovku |
+| `/help` | Zoznam všetkých príkazov |
+| `/exit` | Ukončí session |
 
-### Pipe input
+Klávesy: **↑↓** história · **ESC** preruší odpoveď · **Tab** dopĺňa slash príkazy
 
-Pass text via stdin:
+---
+
+## Tool layer
+
+V interaktívnom móde môže model volať tieto nástroje:
+
+| Nástroj | Popis | Approval |
+|---------|-------|----------|
+| `read_file(path, offset?, limit?)` | Číta súbor | Automatické |
+| `write_file(path, content)` | Zapíše súbor | Vždy pýta [y/N] |
+| `grep_search(pattern, path?, options?)` | Hľadá vzor v súboroch | Automatické |
+| `git_info(type)` | Git status / diff / log / branch | Automatické |
+| `run_shell(command)` | Ľubovoľný shell príkaz | Podľa `/auto` módu |
+| `delegate_to_flash(prompt)` | Pro → Flash delegácia | Automatické (len Pro) |
+
+Flash interactive dostane: `run_shell + read_file + write_file + grep_search + git_info`  
+Pro dostane všetko vrátane `delegate_to_flash`.
+
+---
+
+## Approval loop — `/auto`
 
 ```bash
-echo "text to analyze" | ai flash
-cat file.txt | ai flash "summarize:"
+/auto off    # default: každý run_shell pýta potvrdenie [y/N]
+/auto safe   # read-only príkazy (cat, ls, git diff...) sú auto; ostatné pýtajú
+/auto on     # všetky run_shell príkazy sú auto (bez potvrdenia)
 ```
 
-## Models
+`write_file` **vždy** pýta potvrdenie bez ohľadu na `/auto` mód.
 
-- **flash** = deepseek-v4-flash (fast, cost-effective)
-- **pro** = deepseek-v4-pro (thorough, extended reasoning)
+Bezpečné príkazy (pre `safe` mód): `cat`, `ls`, `find`, `grep`, `head`, `tail`, `git status`, `git log`, `git diff`, `git branch`, `git show`, `wc`, `du`, `df`, `which`, `file`, `stat`, `date`, `pwd`.
 
-Pro is recommended for analysis; Flash for implementation. Efficient workflow: analysis (Pro) → implementation (Flash) → final review (Pro).
+---
 
-Pro automatically delegates suitable subtasks to Flash via tool calls. Status markers in output:
+## Context hierarchia
+
+Systémový prompt sa zostavuje z týchto vrstiev (od najvšeobecnejšej):
 
 ```
-[pro...]      — Pro thinking
-[→ flash: reason]  — Delegating to Flash
-[← pro]       — Returning to Pro
+~/.ai-os/instructions.md           # Globálne pokyny (jazyk, rola, správanie)
+~/.ai-os/memory.md                 # Globálna pamäť
+~/.ai-os/context.md                # Globálny kontext (stack, prostredie)
+<workspace>/ds.md                  # Workspace meta-info
+<workspace>/memory/instructions.md # Workspace pokyny
+<workspace>/memory/memory.md       # Workspace pamäť
+<workspace>/memory/context.md      # Workspace kontext
+<projekt>/ds.md                    # Projektové pokyny (CWD walk nahor)
 ```
 
-## Slash commands
+**Runtime kontext** — pri každej správe sa automaticky injektuje:
+```
+[Runtime Context]
+CWD: /Users/martinzuzic/myproject
+Git: branch=main, 3 zmenených
+```
 
-Available in interactive mode:
+Model vždy vie kde sa nachádza a aký je stav repozitára.
 
-| Command | Description |
-|---------|-------------|
-| `/status` | Show current model, temperature, message count, token estimates, active delegations |
-| `/reset` | Clear conversation history |
-| `/compact` | Compress conversation history |
-| `/plan` | Output only a structured plan for the next message |
-| `/batch <file>` | Run prompts from file (one per line; lines starting with # are ignored) |
-| `/save [name]` | Save conversation to a named session |
-| `/load [name]` | Load a named session |
-| `/model [flash\|pro]` | Switch models mid-conversation |
-| `/memory` | Show loaded context files |
-| `/project [set <path>\|clear]` | Show, set, or clear the active project for ds.md loading |
-| `/clear` | Clear terminal screen |
-| `/help` | List all commands |
-| `/exit` | Exit interactive mode |
+---
 
-## Context files
-
-A layered system assembles context into the system prompt (loaded in order):
-
-1. `~/.ai-os/instructions.md` — Base behavior, language, and tone (auto-created on first run)
-2. `~/.ai-os/memory.md` — Accumulated facts and preferences (auto-created on first run)
-3. `~/.ai-os/context.md` — Active context (optional)
-4. `./ds.md` — Project-level instructions (discovered by walking up from CWD)
-
-## Environment variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DEEPSEEK_API_KEY` | API key for DeepSeek (required) | — |
-| `AI_TEMPERATURE` | Model temperature (0–1) | 0 |
-| `AI_CONTEXT_LIMIT` | Max tokens before auto-compressing session history | 6000 |
-
-## Shell hook
-
-The setup script offers to install a zsh hook that tracks your current project. When you `cd` into a git repository containing a `ds.md` file, the hook writes the project path to `~/.ai-os/current-project`. This ensures `ds.md` is always loaded even when `ai` is invoked from outside the project directory.
-
-## File layout
+## Konfiguračné súbory
 
 ```
 ~/.ai-os/
-  instructions.md
-  memory.md
-  context.md
-  sessions/
-    history.json
-    interactive_history
-    named/
-      <name>.json
-  tmp/
-    last_output.json
-    last_stream.txt
-  current-project
+├── instructions.md       # Rola, jazyk, správanie (auto-vytvorené)
+├── memory.md             # Pamäť naprieč session (auto-vytvorené)
+├── context.md            # Kontext (stack, prostredie)
+├── workspace             # Pointer na aktívny workspace
+├── current-project       # Pointer na aktívny projekt (z shell hooku)
+├── sessions/
+│   ├── history.json      # Session história
+│   ├── interactive_history  # Readline história
+│   └── named/            # Named sessions (/save)
+└── tmp/
+    ├── last_output.json  # Posledná raw API odpoveď
+    └── last_stream.txt   # Posledný výstup modelu
+```
+
+Nastavenie: `ai flash -i` → `/memory edit instructions`
+
+---
+
+## Environment variables
+
+| Premenná | Popis | Default |
+|----------|-------|---------|
+| `DEEPSEEK_API_KEY` | API kľúč (povinný) | — |
+| `AI_TEMPERATURE` | Teplota modelu (0–1) | `0` |
+| `AI_CONTEXT_LIMIT` | Max tokeny pred auto-kompresiou | `6000` |
+
+---
+
+## Testy
+
+```bash
+bats tests/ai.bats    # 87+ testov
+bash -n ai            # syntax check
 ```

@@ -1183,3 +1183,135 @@ MOCKCURL
   [[ "$(< /tmp/curl_payload.json)" == *"## Workspace Context"* ]]
   [[ "$(< /tmp/curl_payload.json)" == *"WS_CTX_MARKER"* ]]
 }
+
+# ── runtime context injection ─────────────────────────────────────────────────
+
+@test "runtime context CWD is injected into user message" {
+  _payload_capture_mock
+  run bash -c "printf 'hello\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"Runtime Context"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"CWD:"* ]]
+}
+
+# ── /auto command ─────────────────────────────────────────────────────────────
+
+@test "/auto on sets auto approve mode" {
+  run bash -c "printf '/auto on\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Auto mode: ON"* ]]
+}
+
+@test "/auto safe sets safe auto mode" {
+  run bash -c "printf '/auto safe\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Auto mode: SAFE"* ]]
+}
+
+@test "/auto off disables auto mode" {
+  run bash -c "printf '/auto off\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Auto mode: OFF"* ]]
+}
+
+# ── tool layer ────────────────────────────────────────────────────────────────
+
+# Helper: mock curl that returns a tool call on call 1, then a final answer on call 2
+_tool_call_mock() {
+  local tool_name="$1" tool_args_json="$2" final_answer="${3:-tool result ok}"
+  local tc_file="$BATS_FILE_TMPDIR/toolcall_$$.json"
+  local ct_file="$BATS_FILE_TMPDIR/toolcount_$$.txt"
+  rm -f "$ct_file"
+
+  jq -n \
+    --arg tn "$tool_name" \
+    --arg ta "$tool_args_json" \
+    '{"choices":[{"message":{"role":"assistant","content":null,
+       "tool_calls":[{"id":"call_test","type":"function",
+         "function":{"name":$tn,"arguments":$ta}}]},
+       "finish_reason":"tool_calls"}]}' > "$tc_file"
+
+  cat > "$MOCK_BIN/curl" << MOCKCURL
+#!/bin/bash
+cf="${ct_file}"
+rf="${tc_file}"
+count=0
+[ -f "\$cf" ] && count=\$(< "\$cf")
+count=\$((count + 1))
+printf '%s' "\$count" > "\$cf"
+if [ "\$count" -eq 1 ]; then
+  cat "\$rf"
+else
+  printf '{"choices":[{"message":{"content":"%s"},"finish_reason":"stop"}]}' "${final_answer}"
+fi
+MOCKCURL
+  chmod +x "$MOCK_BIN/curl"
+}
+
+@test "read_file tool reads an existing file" {
+  local tmpfile="$BATS_FILE_TMPDIR/readable_$$.txt"
+  printf 'READFILE_CONTENT_MARKER\n' > "$tmpfile"
+
+  _tool_call_mock "read_file" "{\"path\":\"$tmpfile\"}" "done reading"
+
+  run bash -c "printf 'read it\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"done reading"* ]]
+}
+
+@test "read_file tool returns error for missing file" {
+  _tool_call_mock "read_file" '{"path":"/nonexistent/file_xyz.txt"}' "got error"
+
+  run bash -c "printf 'read it\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"got error"* ]]
+}
+
+@test "grep_search tool finds pattern in file" {
+  local tmpfile="$BATS_FILE_TMPDIR/grepme_$$.txt"
+  printf 'GREP_UNIQUE_MARKER_XYZ\nother line\n' > "$tmpfile"
+
+  _tool_call_mock "grep_search" "{\"pattern\":\"GREP_UNIQUE_MARKER\",\"path\":\"$tmpfile\"}" "found it"
+
+  run bash -c "printf 'search\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"found it"* ]]
+}
+
+@test "git_info tool returns git status" {
+  local ai_dir
+  ai_dir="$(dirname "$AI_SCRIPT")"
+  _tool_call_mock "git_info" '{"type":"status"}' "git done"
+
+  run bash -c "cd '$ai_dir' && printf 'git?\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"git done"* ]]
+}
+
+@test "write_file tool is cancelled when user answers n" {
+  local tmpfile="$BATS_FILE_TMPDIR/writeme_$$.txt"
+  _tool_call_mock "write_file" "{\"path\":\"$tmpfile\",\"content\":\"should not appear\"}" "write cancelled"
+
+  run bash -c "printf 'write it\nexit\n' | 'n' | '$AI_SCRIPT' flash --interactive 2>/dev/null || true"
+  [ ! -f "$tmpfile" ] || [[ "$(< "$tmpfile")" != "should not appear" ]]
+}
+
+@test "flash interactive payload includes read_file and grep_search" {
+  _payload_capture_mock
+  run bash -c "printf 'hello\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"read_file"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"grep_search"* ]]
+}
+
+@test "pro payload includes read_file git_info and delegate_to_flash" {
+  _payload_capture_mock
+  run "$AI_SCRIPT" pro "hello"
+  [ "$status" -eq 0 ]
+  [ -f /tmp/curl_payload.json ]
+  [[ "$(< /tmp/curl_payload.json)" == *"read_file"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"git_info"* ]]
+  [[ "$(< /tmp/curl_payload.json)" == *"delegate_to_flash"* ]]
+}

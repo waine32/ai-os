@@ -77,7 +77,37 @@ SHELL_TOOL=$(jq -cn '[{
   }
 }]')
 
-PRO_TOOLS=$(jq -cn --argjson a "$FLASH_TOOLS" --argjson b "$SHELL_TOOL" '$a + $b')
+AGENT_TOOLS=$(jq -cn '[
+  {"type":"function","function":{"name":"read_file",
+    "description":"Read a file from the filesystem. Pre-approved, no user confirmation needed.",
+    "parameters":{"type":"object","properties":{
+      "path":   {"type":"string","description":"File path to read"},
+      "offset": {"type":"integer","description":"Start line 1-based (default: 1)"},
+      "limit":  {"type":"integer","description":"Max lines to return (default: 200)"}
+    },"required":["path"]}}},
+  {"type":"function","function":{"name":"write_file",
+    "description":"Write content to a file. Always asks for user confirmation before writing.",
+    "parameters":{"type":"object","properties":{
+      "path":    {"type":"string","description":"File path to write"},
+      "content": {"type":"string","description":"Complete file content"}
+    },"required":["path","content"]}}},
+  {"type":"function","function":{"name":"grep_search",
+    "description":"Search for a pattern in files. Pre-approved. Returns matching lines with file:line references.",
+    "parameters":{"type":"object","properties":{
+      "pattern": {"type":"string","description":"Search pattern (regex ok)"},
+      "path":    {"type":"string","description":"Directory or file to search (default: .)"},
+      "options": {"type":"string","description":"Extra grep flags e.g. -i -l -w"}
+    },"required":["pattern"]}}},
+  {"type":"function","function":{"name":"git_info",
+    "description":"Get git repository information. Pre-approved.",
+    "parameters":{"type":"object","properties":{
+      "type":{"type":"string","enum":["status","diff","log","branch"],
+              "description":"status=short status, diff=unstaged diff, log=recent commits, branch=current branch"}
+    },"required":["type"]}}}
+]')
+
+FLASH_INTERACTIVE_TOOLS=$(jq -cn --argjson a "$SHELL_TOOL" --argjson b "$AGENT_TOOLS" '$a + $b')
+PRO_TOOLS=$(jq -cn --argjson a "$FLASH_TOOLS" --argjson b "$SHELL_TOOL" --argjson c "$AGENT_TOOLS" '$a + $b + $c')
 
 # ── context file hierarchy ────────────────────────────────────────────────────
 
@@ -387,17 +417,8 @@ run_agentic() {
           printf '[← pro]\n' >&2
           delegation_count=$((delegation_count + 1))
         fi
-      elif [[ "$func_name" == "run_shell" ]]; then
-        local run_cmd run_reason
-        run_cmd=$(jq -r '.command // empty' <<< "$func_args_json")
-        run_reason=$(jq -r '.reason // ""' <<< "$func_args_json")
-        if [[ -z "$run_cmd" ]]; then
-          flash_result="Error: run_shell called with empty command"
-        else
-          flash_result=$(_exec_shell_tool "$run_cmd" "$run_reason")
-        fi
       else
-        flash_result="Error: unknown tool '${func_name}'"
+        flash_result=$(_handle_tool_call "$func_name" "$func_args_json")
       fi
 
       messages=$(jq -n \
@@ -419,11 +440,41 @@ run_agentic() {
 # no-op stub — overridden in interactive mode to clear the animation
 _stop_spinner() { :; }
 
+SHELL_AUTO_APPROVE=""  # "" = off | "safe" = auto for read-only | "on" = always auto
+
+# Returns 0 if command is read-only / non-destructive, 1 otherwise.
+_is_safe_op() {
+  local _c="$1"
+  local _safe=(
+    "cat " "ls" "ls " "find " "echo " "pwd" "which " "file " "stat "
+    "head " "tail " "wc " "tree" "tree " "grep " "rg " "ag "
+    "git status" "git log" "git diff" "git branch" "git show"
+    "type " "basename " "dirname " "printf " "date" "du " "df "
+  )
+  for _p in "${_safe[@]}"; do
+    [[ "$_c" == "$_p"* || "$_c" == "${_p% }" ]] && return 0
+  done
+  return 1
+}
+
 # _exec_shell_tool CMD [REASON] — shows command, asks user confirmation, executes
-# Returns command output to stdout; safe default (no) when /dev/tty unavailable.
+# Respects SHELL_AUTO_APPROVE. Safe default (no) when /dev/tty unavailable.
 _exec_shell_tool() {
   local _cmd="$1" _reason="${2:-}"
-  _stop_spinner  # clear spinner before user interaction (no-op if not running)
+  _stop_spinner
+
+  if [[ "$SHELL_AUTO_APPROVE" == "on" ]]; then
+    printf '\n[auto] %s\n' "$_cmd" >&2
+    bash -c "$_cmd" 2>&1 || printf '[exit %s]\n' "$?"
+    return
+  fi
+
+  if [[ "$SHELL_AUTO_APPROVE" == "safe" ]] && _is_safe_op "$_cmd"; then
+    printf '\n[safe] %s\n' "$_cmd" >&2
+    bash -c "$_cmd" 2>&1 || printf '[exit %s]\n' "$?"
+    return
+  fi
+
   [[ -n "$_reason" ]] \
     && printf '\n[shell] %s  # %s\n' "$_cmd" "$_reason" >&2 \
     || printf '\n[shell] %s\n' "$_cmd" >&2
@@ -437,16 +488,97 @@ _exec_shell_tool() {
   fi
 }
 
+# ── agent tool implementations ────────────────────────────────────────────────
+
+_tool_read_file() {
+  local _args="$1"
+  local _path _offset _limit
+  _path=$(jq -r '.path // empty' <<< "$_args")
+  _offset=$(jq -r '.offset // 1' <<< "$_args")
+  _limit=$(jq -r '.limit // 200' <<< "$_args")
+  [[ -z "$_path" ]] && printf 'Error: path required' && return
+  [[ ! -f "$_path" ]] && printf 'Error: file not found: %s' "$_path" && return
+  local _end=$(( _offset + _limit - 1 ))
+  sed -n "${_offset},${_end}p" "$_path" 2>&1
+}
+
+_tool_write_file() {
+  local _args="$1"
+  local _path _content
+  _path=$(jq -r '.path // empty' <<< "$_args")
+  _content=$(jq -r '.content // empty' <<< "$_args")
+  [[ -z "$_path" ]] && printf 'Error: path required' && return
+  _stop_spinner
+  printf '\n[write_file] %s (%d B)\nZapísať? [y/N] ' "$_path" "${#_content}" >&2
+  local _ans=""
+  IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
+  if [[ "$_ans" =~ ^[Yy]$ ]]; then
+    printf '%s' "$_content" > "$_path" 2>&1 \
+      && printf 'OK: %s (%d bajtov)' "$_path" "${#_content}" \
+      || printf 'Error: zápis zlyhal'
+  else
+    printf '[zrušené užívateľom]'
+  fi
+}
+
+_tool_grep_search() {
+  local _args="$1"
+  local _pattern _path _opts
+  _pattern=$(jq -r '.pattern // empty' <<< "$_args")
+  _path=$(jq -r '.path // "."' <<< "$_args")
+  _opts=$(jq -r '.options // ""' <<< "$_args")
+  [[ -z "$_pattern" ]] && printf 'Error: pattern required' && return
+  # shellcheck disable=SC2086
+  grep -rn $opts "$_pattern" "$_path" 2>&1 | head -100
+}
+
+_tool_git_info() {
+  local _args="$1"
+  local _type
+  _type=$(jq -r '.type // "status"' <<< "$_args")
+  case "$_type" in
+    status) git status --short 2>&1 ;;
+    diff)   git diff HEAD 2>&1 | head -300 ;;
+    log)    git log --oneline -20 2>&1 ;;
+    branch) git branch --show-current 2>&1 ;;
+    *)      printf 'Error: neznámy typ git_info' ;;
+  esac
+}
+
+# _handle_tool_call FUNC_NAME FUNC_ARGS — dispatcher for all agent tools.
+# Prints result to stdout. Does NOT handle delegate_to_flash (run_agentic only).
+_handle_tool_call() {
+  local _fn="$1" _fa="$2" _result=""
+  case "$_fn" in
+    run_shell)
+      local _sc _sr
+      _sc=$(jq -r '.command // empty' <<< "$_fa")
+      _sr=$(jq -r '.reason // ""' <<< "$_fa")
+      if [[ -z "$_sc" ]]; then
+        _result="Error: run_shell called with empty command"
+      else
+        _result=$(_exec_shell_tool "$_sc" "$_sr")
+      fi
+      ;;
+    read_file)    _result=$(_tool_read_file "$_fa") ;;
+    write_file)   _result=$(_tool_write_file "$_fa") ;;
+    grep_search)  _result=$(_tool_grep_search "$_fa") ;;
+    git_info)     _result=$(_tool_git_info "$_fa") ;;
+    *)            _result="Error: unknown tool '${_fn}'" ;;
+  esac
+  printf '%s' "$_result"
+}
+
 # run_interactive_flash MESSAGES — blocking tool-call loop for flash interactive mode.
-# Handles run_shell tool calls; prints final content to stdout.
+# Handles all FLASH_INTERACTIVE_TOOLS; prints final content to stdout.
 run_interactive_flash() {
   local _msgs="$1"
   local _max_iter=10 _iter=0 _finish _content
   local _tool_calls _assistant_msg _n_tools _tool_idx
-  local _call_id _func_name _func_args _tool_result _shell_cmd _shell_reason
+  local _call_id _func_name _func_args _tool_result
 
   while [[ $_iter -lt $_max_iter ]]; do
-    ask "$_msgs" false "$SHELL_TOOL" >/dev/null
+    ask "$_msgs" false "$FLASH_INTERACTIVE_TOOLS" >/dev/null
     _finish=$(jq -r '.choices[0].finish_reason // "stop"' < "$AI_TMP/last_output.json")
 
     if [[ "$_finish" != "tool_calls" ]]; then
@@ -466,18 +598,7 @@ run_interactive_flash() {
       _call_id=$(jq -r ".[$_tool_idx].id" <<< "$_tool_calls")
       _func_name=$(jq -r ".[$_tool_idx].function.name" <<< "$_tool_calls")
       _func_args=$(jq -r ".[$_tool_idx].function.arguments" <<< "$_tool_calls")
-
-      if [[ "$_func_name" == "run_shell" ]]; then
-        _shell_cmd=$(jq -r '.command // empty' <<< "$_func_args")
-        _shell_reason=$(jq -r '.reason // ""' <<< "$_func_args")
-        if [[ -z "$_shell_cmd" ]]; then
-          _tool_result="Error: run_shell called with empty command"
-        else
-          _tool_result=$(_exec_shell_tool "$_shell_cmd" "$_shell_reason")
-        fi
-      else
-        _tool_result="Error: unknown tool '${_func_name}'"
-      fi
+      _tool_result=$(_handle_tool_call "$_func_name" "$_func_args")
 
       _msgs=$(jq -n \
         --argjson h "$_msgs" \
@@ -606,6 +727,21 @@ if [[ "$MODE" = "interactive" ]]; then
       _SPINNER_PID=""
       printf ' \b' >&2  # overwrite last spinner char, cursor stays in place
     fi
+  }
+
+  SHELL_AUTO_APPROVE=""  # session-scoped; reset on each interactive session
+
+  # Inject lightweight runtime state before each user message.
+  _runtime_context() {
+    local _ctx="[Runtime Context]"$'\n'"CWD: $PWD"
+    if git rev-parse --git-dir &>/dev/null 2>&1; then
+      local _branch _changes
+      _branch=$(git branch --show-current 2>/dev/null || printf 'detached')
+      _changes=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+      _ctx+=$'\n'"Git: branch=${_branch}"
+      [[ "$_changes" -gt 0 ]] && _ctx+=", ${_changes} zmenených" || _ctx+=", čistý"
+    fi
+    printf '%s' "$_ctx"
   }
 
   # Tab completion for slash commands
@@ -1117,6 +1253,16 @@ WSDSEOF
             echo "Session nenájdená: $local_name"
           fi
           ;;
+        /auto*)
+          local_auto_sub="${INPUT#/auto}"
+          local_auto_sub="${local_auto_sub## }"
+          case "$local_auto_sub" in
+            on)     SHELL_AUTO_APPROVE="on";   printf 'Auto mode: ON  (všetky shell príkazy sa spustia bez potvrdenia)\n' ;;
+            safe)   SHELL_AUTO_APPROVE="safe"; printf 'Auto mode: SAFE  (read-only príkazy auto, write/exec vyžadujú potvrdenie)\n' ;;
+            off|"") SHELL_AUTO_APPROVE="";    printf 'Auto mode: OFF  (každý príkaz vyžaduje potvrdenie)\n' ;;
+            *)      printf 'Použitie: /auto [on|safe|off]\n' ;;
+          esac
+          ;;
         /help)
           printf '!<príkaz>        spustí shell príkaz priamo — model obídený, tokeny ušetrené\n'
           printf '/status          model, teplota, správy, tokeny, pamäť\n'
@@ -1126,7 +1272,8 @@ WSDSEOF
           printf '/batch <súbor>   spustí prompty zo súboru sekvenčne\n'
           printf '/save [meno]     uloží konverzáciu do named session\n'
           printf '/load [meno]     načíta named session\n'
-          printf '/model [flash|pro]  prepne model  (pro deleguje subtasky na flash + run_shell)\n'
+          printf '/model [flash|pro]  prepne model\n'
+          printf '/auto [on|safe|off]  approval loop: on=vždy auto, safe=read-only auto, off=vždy pýtaj\n'
           printf '/memory          zobrazí všetky kontext vrstvy (globálne + workspace + projekt)\n'
           printf '/memory edit [kľúč]  otvorí súbor v editore  (instructions|memory|context|ws|proj)\n'
           printf '/memory add <text>  rýchly zápis do ~/.ai-os/memory.md\n'
@@ -1135,6 +1282,7 @@ WSDSEOF
           printf '/clear           vymaže obrazovku\n'
           printf '/help            tento zoznam\n'
           printf '/exit            ukončí session\n'
+          printf '\nNástroje modelu: run_shell · read_file · write_file · grep_search · git_info\n'
           ;;
         /exit)
           break
@@ -1153,7 +1301,9 @@ WSDSEOF
       PLAN_MODE=false
     fi
 
-    CONV=$(jq -n --argjson h "$CONV" --arg c "$INPUT" '$h + [{"role":"user","content":$c}]')
+    local_rtctx=$(_runtime_context)
+    local_user_msg="$(printf '%s\n\n%s' "$local_rtctx" "$INPUT")"
+    CONV=$(jq -n --argjson h "$CONV" --arg c "$local_user_msg" '$h + [{"role":"user","content":$c}]')
     printf '\nai: '
 
     _AI_INTERRUPTED=0

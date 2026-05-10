@@ -1315,3 +1315,41 @@ MOCKCURL
   [[ "$(< /tmp/curl_payload.json)" == *"git_info"* ]]
   [[ "$(< /tmp/curl_payload.json)" == *"delegate_to_flash"* ]]
 }
+
+# ── Color scheme ──────────────────────────────────────────────────────────────
+
+@test "color constants are empty when NO_COLOR is set" {
+  run bash -c "NO_COLOR=1 '$AI_SCRIPT' flash 'hello'"
+  [ "$status" -eq 0 ]
+  # Output should contain no ANSI escape sequences
+  [[ "$output" != *$'\033['* ]]
+}
+
+@test "color constants are empty in non-TTY (piped) mode" {
+  # Tests always run without a TTY on stderr — verify output is clean
+  run "$AI_SCRIPT" flash "hello"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *$'\033['* ]]
+}
+
+# ── Thinking indicator (spinner stubs) ────────────────────────────────────────
+
+@test "run_agentic spinner stubs are no-ops outside interactive mode" {
+  # run_agentic calls _start_spinner/_stop_spinner which are stubs in non-interactive
+  # Verify the pro command completes successfully without spinner-related errors
+  run "$AI_SCRIPT" pro "test spinner stubs"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test response"* ]]
+}
+
+# ── Diff viewer ───────────────────────────────────────────────────────────────
+
+@test "write_file cancelled still shows new file label in tool result" {
+  local new_file="$HOME/test_writefile_new_$$.txt"
+  _tool_call_mock "write_file" "{\"path\":\"$new_file\",\"content\":\"hello\"}" "done"
+  run bash -c "printf 'hello\nn\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  # new file: diff block shows "(nový súbor ...)" on stderr (captured via run 2>&1)
+  [[ "$output" == *"nový súbor"* ]]
+  rm -f "$new_file"
+}

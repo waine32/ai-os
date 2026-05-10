@@ -387,8 +387,10 @@ run_agentic() {
   local orig_model="$MODEL" orig_model_name="$MODEL_NAME"
 
   while [[ $delegation_count -le $max_delegations ]]; do
-    printf '[pro...]\n' >&2
+    printf "${_C_DIM}[pro...]${_C_RESET}\n" >&2
+    _start_spinner
     ask "$messages" false "$PRO_TOOLS" >/dev/null
+    _stop_spinner
     local finish_reason
     finish_reason=$(jq -r '.choices[0].finish_reason // "stop"' < "$AI_TMP/last_output.json")
 
@@ -423,15 +425,18 @@ run_agentic() {
         elif [[ ${#flash_prompt} -gt 10000 ]]; then
           flash_result="Error: delegated prompt too large (max 10000 chars)"
         else
-          [[ -n "$flash_reason" ]] && printf '[→ flash: %s]\n' "$flash_reason" >&2 \
-                                    || printf '[→ flash]\n' >&2
+          [[ -n "$flash_reason" ]] \
+            && printf "${_C_DIM}[→ flash: %s]${_C_RESET}\n" "$flash_reason" >&2 \
+            || printf "${_C_DIM}[→ flash]${_C_RESET}\n" >&2
           MODEL="flash" MODEL_NAME="deepseek-v4-flash"
           local flash_messages
           flash_messages=$(jq -n --arg c "$flash_prompt" '[{"role":"user","content":$c}]')
+          _start_spinner
           ask "$flash_messages" true
+          _stop_spinner
           flash_result=$(< "$AI_TMP/last_stream.txt")
           MODEL="$orig_model" MODEL_NAME="$orig_model_name"
-          printf '[← pro]\n' >&2
+          printf "${_C_DIM}[← pro]${_C_RESET}\n" >&2
           delegation_count=$((delegation_count + 1))
         fi
       else
@@ -446,18 +451,35 @@ run_agentic() {
     done
   done
 
-  printf '[pro: concluding...]\n' >&2
+  printf "${_C_DIM}[pro: concluding...]${_C_RESET}\n" >&2
+  _start_spinner
   ask "$messages" false >/dev/null
+  _stop_spinner
   local final_content
   final_content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
   printf '%s\n' "$final_content"
   printf '%s' "$final_content" > "$AI_TMP/last_stream.txt"
 }
 
+# ANSI color constants — empty when stderr is not a TTY (pipes, tests, NO_COLOR)
+if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+  _C_RESET='\033[0m'
+  _C_PATH='\033[36m'   # cyan   — paths, files, diff @@ headers
+  _C_CMD='\033[33m'    # yellow — shell commands
+  _C_OK='\033[32m'     # green  — [auto], [safe], success messages
+  _C_ERR='\033[31m'    # red    — errors, [exit N], diff deletions
+  _C_DIM='\033[2m'     # dim    — [pro...], [→ flash:], meta prefixes
+  _C_BOLD='\033[1m'    # bold   — [y/N] confirmation prompts
+else
+  _C_RESET='' _C_PATH='' _C_CMD='' _C_OK='' _C_ERR='' _C_DIM='' _C_BOLD=''
+fi
+
 # no-op stubs — overridden once the interactive session starts
 _stop_spinner()      { :; }
+_start_spinner()     { :; }
 _stop_esc_monitor()  { :; }
 _start_esc_monitor() { :; }
+_colorize_diff()     { :; }
 
 SHELL_AUTO_APPROVE=""  # "" = off | "safe" = auto for read-only | "on" = always auto
 
@@ -483,27 +505,29 @@ _exec_shell_tool() {
   _stop_spinner
 
   if [[ "$SHELL_AUTO_APPROVE" == "on" ]]; then
-    printf '\n[auto] %s\n' "$_cmd" >&2
-    bash -c "$_cmd" 2>&1 || printf '[exit %s]\n' "$?"
+    printf "\n${_C_OK}[auto]${_C_RESET} ${_C_CMD}%s${_C_RESET}\n" "$_cmd" >&2
+    bash -c "$_cmd" 2>&1 || printf "${_C_ERR}[exit %s]${_C_RESET}\n" "$?"
     return
   fi
 
   if [[ "$SHELL_AUTO_APPROVE" == "safe" ]] && _is_safe_op "$_cmd"; then
-    printf '\n[safe] %s\n' "$_cmd" >&2
-    bash -c "$_cmd" 2>&1 || printf '[exit %s]\n' "$?"
+    printf "\n${_C_OK}[safe]${_C_RESET} ${_C_CMD}%s${_C_RESET}\n" "$_cmd" >&2
+    bash -c "$_cmd" 2>&1 || printf "${_C_ERR}[exit %s]${_C_RESET}\n" "$?"
     return
   fi
 
   _stop_esc_monitor
   [[ -n "$_reason" ]] \
-    && printf '\n[shell] %s  # %s\n' "$_cmd" "$_reason" >&2 \
-    || printf '\n[shell] %s\n' "$_cmd" >&2
-  printf 'Spustiť? [y/N] ' >&2
+    && printf "\n[shell] ${_C_CMD}%s${_C_RESET}  # %s\n" "$_cmd" "$_reason" >&2 \
+    || printf "\n[shell] ${_C_CMD}%s${_C_RESET}\n" "$_cmd" >&2
+  printf "${_C_BOLD}Spustiť? [y/N]${_C_RESET} " >&2
   local _ans=""
-  IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
+  if [[ -t 2 ]]; then
+    IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
+  fi
   _start_esc_monitor
   if [[ "$_ans" =~ ^[Yy]$ ]]; then
-    bash -c "$_cmd" 2>&1 || printf '[exit %s]\n' "$?"
+    bash -c "$_cmd" 2>&1 || printf "${_C_ERR}[exit %s]${_C_RESET}\n" "$?"
   else
     printf '[zrušené užívateľom]'
   fi
@@ -531,14 +555,35 @@ _tool_write_file() {
   [[ -z "$_path" ]] && printf 'Error: path required' && return
   _stop_spinner
   _stop_esc_monitor
-  printf '\n[write_file] %s (%d B)\nZapísať? [y/N] ' "$_path" "${#_content}" >&2
+
+  # Show diff before asking — use mktemp (bash 3.2 compat, no process substitution)
+  local _tmp_wf
+  _tmp_wf=$(mktemp "$AI_TMP/write_diff_XXXXXX")
+  printf '%s' "$_content" > "$_tmp_wf"
+  if [[ -f "$_path" ]]; then
+    local _diff_out
+    _diff_out=$(diff -u "$_path" "$_tmp_wf" 2>/dev/null | head -80)
+    if [[ -n "$_diff_out" ]]; then
+      printf '\n' >&2
+      printf '%s\n' "$_diff_out" | _colorize_diff
+    else
+      printf "${_C_DIM}(žiadne zmeny oproti súčasnému obsahu)${_C_RESET}\n" >&2
+    fi
+  else
+    printf "${_C_DIM}(nový súbor — %d B)${_C_RESET}\n" "${#_content}" >&2
+  fi
+  rm -f "$_tmp_wf"
+
+  printf "\n[write_file] ${_C_PATH}%s${_C_RESET}\n${_C_BOLD}Zapísať? [y/N]${_C_RESET} " "$_path" >&2
   local _ans=""
-  IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
+  if [[ -t 2 ]]; then
+    IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
+  fi
   _start_esc_monitor
   if [[ "$_ans" =~ ^[Yy]$ ]]; then
     printf '%s' "$_content" > "$_path" 2>&1 \
-      && printf 'OK: %s (%d bajtov)' "$_path" "${#_content}" \
-      || printf 'Error: zápis zlyhal'
+      && printf "${_C_OK}OK: %s (%d bajtov)${_C_RESET}" "$_path" "${#_content}" \
+      || printf "${_C_ERR}Error: zápis zlyhal${_C_RESET}"
   else
     printf '[zrušené užívateľom]'
   fi
@@ -566,6 +611,18 @@ _tool_git_info() {
     branch) git branch --show-current 2>&1 ;;
     *)      printf 'Error: neznámy typ git_info' ;;
   esac
+}
+
+_colorize_diff() {
+  while IFS= read -r _dl; do
+    case "$_dl" in
+      '@@'*)         printf "${_C_PATH}%s${_C_RESET}\n"  "$_dl" ;;
+      '+++'*|'---'*) printf "${_C_DIM}%s${_C_RESET}\n"   "$_dl" ;;
+      '+'*)          printf "${_C_OK}%s${_C_RESET}\n"    "$_dl" ;;
+      '-'*)          printf "${_C_ERR}%s${_C_RESET}\n"   "$_dl" ;;
+      *)             printf '%s\n' "$_dl" ;;
+    esac
+  done >&2
 }
 
 # _handle_tool_call FUNC_NAME FUNC_ARGS — dispatcher for all agent tools.
@@ -601,11 +658,12 @@ run_interactive_flash() {
   local _call_id _func_name _func_args _tool_result
 
   while [[ $_iter -lt $_max_iter ]]; do
+    _start_spinner
     ask "$_msgs" false "$FLASH_INTERACTIVE_TOOLS" >/dev/null
+    _stop_spinner
     _finish=$(jq -r '.choices[0].finish_reason // "stop"' < "$AI_TMP/last_output.json")
 
     if [[ "$_finish" != "tool_calls" ]]; then
-      _stop_spinner
       _content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
       printf '%s\n' "$_content"
       printf '%s' "$_content" > "$AI_TMP/last_stream.txt"
@@ -1038,7 +1096,7 @@ PROJDS
 ## Dôležité súbory
 PROJCTX
                   fi
-                  echo "✓ Projekt vytvorený: $local_proj_dir"
+                  printf "${_C_OK}✓ Projekt vytvorený: %s${_C_RESET}\n" "$local_proj_dir"
                   for local_pf in "$local_proj_dir/ds.md" "$local_proj_dir/context.md"; do
                     printf 'Upraviť %s? [y/N] ' "$(basename "$local_pf")"
                     local_pans=""
@@ -1049,7 +1107,7 @@ PROJCTX
                   done
                   printf '%s\n' "$local_proj_dir" > ~/.ai-os/current-project
                   cd "$local_proj_dir" 2>/dev/null || true
-                  echo "Projekt nastavený ako aktívny: $local_proj_dir"
+                  printf "${_C_OK}Projekt nastavený ako aktívny: %s${_C_RESET}\n" "$local_proj_dir"
                 fi
               fi
               ;;
@@ -1210,8 +1268,8 @@ WSDSEOF
             cp "$AI_TMP/last_stream.txt" "$local_plan_save_arg" \
               && printf '%s\n' "$local_plan_save_arg" > ~/.ai-os/current-plan \
               && SYSTEM_PROMPT=$(_build_system_prompt) \
-              && printf 'Plán uložený: %s\n' "$local_plan_save_arg" \
-              || printf 'Chyba: zápis zlyhal\n' >&2
+              && printf "${_C_OK}Plán uložený: %s${_C_RESET}\n" "$local_plan_save_arg" \
+              || printf "${_C_ERR}Chyba: zápis zlyhal${_C_RESET}\n" >&2
           else
             printf 'Chyba: žiadna posledná odpoveď na uloženie. Najprv vytvor plán pomocou /plan.\n' >&2
           fi
@@ -1228,7 +1286,7 @@ WSDSEOF
           else
             printf '%s\n' "$local_plan_load_arg" > ~/.ai-os/current-plan
             SYSTEM_PROMPT=$(_build_system_prompt)
-            printf 'Plán načítaný: %s\n' "$local_plan_load_arg"
+            printf "${_C_OK}Plán načítaný: %s${_C_RESET}\n" "$local_plan_load_arg"
           fi
           local_skip_api=true
           ;;
@@ -1236,7 +1294,7 @@ WSDSEOF
           if [[ -f ~/.ai-os/current-plan ]]; then
             rm -f ~/.ai-os/current-plan
             SYSTEM_PROMPT=$(_build_system_prompt)
-            printf 'Aktívny plán zrušený.\n'
+            printf "${_C_OK}Aktívny plán zrušený.${_C_RESET}\n"
           else
             printf '(žiadny aktívny plán)\n'
           fi
@@ -1411,9 +1469,7 @@ WSDSEOF
     if [[ "$MODEL" == "pro" ]]; then
       run_agentic "$CONV" && _ask_ok=1 || true
     else
-      _start_spinner
       run_interactive_flash "$CONV" && _ask_ok=1 || true
-      _stop_spinner  # safety — if not already stopped inside run_interactive_flash
     fi
 
     _stop_esc_monitor

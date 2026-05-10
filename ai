@@ -476,8 +476,11 @@ if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
   _C_ERR='\033[31m'    # red    — errors, [exit N], diff deletions
   _C_DIM='\033[2m'     # dim    — [pro...], [→ flash:], meta prefixes
   _C_BOLD='\033[1m'    # bold   — [y/N] confirmation prompts
+  _C_BG_ADD='\033[42m' # green bg — diff added lines
+  _C_BG_DEL='\033[41m' # red bg  — diff removed lines
 else
   _C_RESET='' _C_PATH='' _C_CMD='' _C_OK='' _C_ERR='' _C_DIM='' _C_BOLD=''
+  _C_BG_ADD='' _C_BG_DEL=''
 fi
 
 # no-op stubs — overridden once the interactive session starts
@@ -638,8 +641,8 @@ _colorize_diff() {
     case "$_dl" in
       '@@'*)         printf "${_C_PATH}%s${_C_RESET}\n"  "$_dl" ;;
       '+++'*|'---'*) printf "${_C_DIM}%s${_C_RESET}\n"   "$_dl" ;;
-      '+'*)          printf "${_C_OK}%s${_C_RESET}\n"    "$_dl" ;;
-      '-'*)          printf "${_C_ERR}%s${_C_RESET}\n"   "$_dl" ;;
+      '+'*)          printf "${_C_BG_ADD}%s${_C_RESET}\n"  "$_dl" ;;
+      '-'*)          printf "${_C_BG_DEL}%s${_C_RESET}\n"  "$_dl" ;;
       *)             printf '%s\n' "$_dl" ;;
     esac
   done >&2

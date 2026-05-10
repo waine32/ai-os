@@ -775,11 +775,11 @@ if [[ "$MODE" = "interactive" ]]; then
       done
     ) &
     _ESC_PID=$!
+    disown "$_ESC_PID" 2>/dev/null || true
   }
   _stop_esc_monitor() {
     if [[ -n "$_ESC_PID" ]]; then
       kill "$_ESC_PID" 2>/dev/null || true
-      wait "$_ESC_PID" 2>/dev/null || true
       _ESC_PID=""
     fi
     # read -r -s in the subshell disables terminal echo; restore it on kill
@@ -798,11 +798,11 @@ if [[ "$MODE" = "interactive" ]]; then
       done
     ) &
     _SPINNER_PID=$!
+    disown "$_SPINNER_PID" 2>/dev/null || true
   }
   _stop_spinner() {
     if [[ -n "$_SPINNER_PID" ]]; then
       kill "$_SPINNER_PID" 2>/dev/null || true
-      wait "$_SPINNER_PID" 2>/dev/null || true
       _SPINNER_PID=""
       printf ' \b' >&2  # overwrite last spinner char, cursor stays in place
     fi

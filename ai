@@ -525,7 +525,6 @@ _exec_shell_tool() {
   if [[ -t 2 ]]; then
     IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
   fi
-  _start_esc_monitor
   if [[ "$_ans" =~ ^[Yy]$ ]]; then
     bash -c "$_cmd" 2>&1 || printf "${_C_ERR}[exit %s]${_C_RESET}\n" "$?"
   else
@@ -579,7 +578,6 @@ _tool_write_file() {
   if [[ -t 2 ]]; then
     IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
   fi
-  _start_esc_monitor
   if [[ "$_ans" =~ ^[Yy]$ ]]; then
     printf '%s' "$_content" > "$_path" 2>&1 \
       && printf "${_C_OK}OK: %s (%d bajtov)${_C_RESET}" "$_path" "${#_content}" \

@@ -196,7 +196,7 @@ _build_system_prompt() {
     local proj_root
     proj_root=$(< ~/.ai-os/current-project)
     proj_root="${proj_root%$'\n'}"
-    if [[ "$proj_root" = "$HOME"* && -f "$proj_root/ds.md" ]]; then
+    if [[ -d "$proj_root" && -f "$proj_root/ds.md" ]]; then
       local already_loaded=0
       if [[ ${#ds_files[@]} -gt 0 ]]; then
         for f in "${ds_files[@]}"; do
@@ -212,14 +212,31 @@ _build_system_prompt() {
     done
   fi
 
+  # Active plan layer — loaded from ~/.ai-os/current-plan pointer
+  local plan_content=""
+  if [[ -f ~/.ai-os/current-plan ]]; then
+    local _plan_path
+    _plan_path=$(< ~/.ai-os/current-plan); _plan_path="${_plan_path%$'\n'}"
+    if [[ -f "$_plan_path" && -r "$_plan_path" ]]; then
+      local _plan_lines
+      _plan_lines=$(wc -l < "$_plan_path" | tr -d ' ')
+      if [[ "$_plan_lines" -gt 200 ]]; then
+        plan_content=$(head -200 "$_plan_path")$'\n\n[... plán skrátený na 200 riadkov ...]'
+      else
+        plan_content=$(< "$_plan_path")
+      fi
+    fi
+  fi
+
   local prompt="$instructions"
-  [[ -n "$memory"     ]] && prompt+=$'\n\n## Memory\n'"$memory"
-  [[ -n "$context"    ]] && prompt+=$'\n\n## Context\n'"$context"
-  [[ -n "$ws_meta"    ]] && prompt+=$'\n\n## Workspace\n'"$ws_meta"
-  [[ -n "$ws_instr"   ]] && prompt+=$'\n\n## Workspace Instructions\n'"$ws_instr"
-  [[ -n "$ws_mem"     ]] && prompt+=$'\n\n## Workspace Memory\n'"$ws_mem"
-  [[ -n "$ws_ctx"     ]] && prompt+=$'\n\n## Workspace Context\n'"$ws_ctx"
-  [[ -n "$ds_content" ]] && prompt+=$'\n\n## Project\n'"$ds_content"
+  [[ -n "$memory"       ]] && prompt+=$'\n\n## Memory\n'"$memory"
+  [[ -n "$context"      ]] && prompt+=$'\n\n## Context\n'"$context"
+  [[ -n "$ws_meta"      ]] && prompt+=$'\n\n## Workspace\n'"$ws_meta"
+  [[ -n "$ws_instr"     ]] && prompt+=$'\n\n## Workspace Instructions\n'"$ws_instr"
+  [[ -n "$ws_mem"       ]] && prompt+=$'\n\n## Workspace Memory\n'"$ws_mem"
+  [[ -n "$ws_ctx"       ]] && prompt+=$'\n\n## Workspace Context\n'"$ws_ctx"
+  [[ -n "$ds_content"   ]] && prompt+=$'\n\n## Project\n'"$ds_content"
+  [[ -n "$plan_content" ]] && prompt+=$'\n\n## Aktívny plán\n'"$plan_content"
   echo "$prompt"
 }
 
@@ -437,8 +454,10 @@ run_agentic() {
   printf '%s' "$final_content" > "$AI_TMP/last_stream.txt"
 }
 
-# no-op stub — overridden in interactive mode to clear the animation
-_stop_spinner() { :; }
+# no-op stubs — overridden once the interactive session starts
+_stop_spinner()      { :; }
+_stop_esc_monitor()  { :; }
+_start_esc_monitor() { :; }
 
 SHELL_AUTO_APPROVE=""  # "" = off | "safe" = auto for read-only | "on" = always auto
 
@@ -475,12 +494,14 @@ _exec_shell_tool() {
     return
   fi
 
+  _stop_esc_monitor
   [[ -n "$_reason" ]] \
     && printf '\n[shell] %s  # %s\n' "$_cmd" "$_reason" >&2 \
     || printf '\n[shell] %s\n' "$_cmd" >&2
   printf 'Spustiť? [y/N] ' >&2
   local _ans=""
   IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
+  _start_esc_monitor
   if [[ "$_ans" =~ ^[Yy]$ ]]; then
     bash -c "$_cmd" 2>&1 || printf '[exit %s]\n' "$?"
   else
@@ -509,9 +530,11 @@ _tool_write_file() {
   _content=$(jq -r '.content // empty' <<< "$_args")
   [[ -z "$_path" ]] && printf 'Error: path required' && return
   _stop_spinner
+  _stop_esc_monitor
   printf '\n[write_file] %s (%d B)\nZapísať? [y/N] ' "$_path" "${#_content}" >&2
   local _ans=""
   IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
+  _start_esc_monitor
   if [[ "$_ans" =~ ^[Yy]$ ]]; then
     printf '%s' "$_content" > "$_path" 2>&1 \
       && printf 'OK: %s (%d bajtov)' "$_path" "${#_content}" \
@@ -529,7 +552,7 @@ _tool_grep_search() {
   _opts=$(jq -r '.options // ""' <<< "$_args")
   [[ -z "$_pattern" ]] && printf 'Error: pattern required' && return
   # shellcheck disable=SC2086
-  grep -rn $opts "$_pattern" "$_path" 2>&1 | head -100
+  grep -rn ${_opts} "$_pattern" "$_path" 2>&1 | head -100
 }
 
 _tool_git_info() {
@@ -799,7 +822,8 @@ if [[ "$MODE" = "interactive" ]]; then
 
     # Standard slash command prefix completion
     [[ "$cur" != /* ]] && return
-    local cmds=("/status" "/reset" "/compact" "/plan" "/batch " "/save " "/load "
+    local cmds=("/status" "/reset" "/compact" "/plan" "/plan save" "/plan load "
+                 "/plan clear" "/plan show" "/batch " "/save " "/load "
                  "/model " "/memory" "/project" "/workspace" "/clear" "/help" "/exit")
     local matches=()
     for c in "${cmds[@]}"; do
@@ -1024,7 +1048,8 @@ PROJCTX
                     fi
                   done
                   printf '%s\n' "$local_proj_dir" > ~/.ai-os/current-project
-                  echo "Projekt nastavený ako aktívny."
+                  cd "$local_proj_dir" 2>/dev/null || true
+                  echo "Projekt nastavený ako aktívny: $local_proj_dir"
                 fi
               fi
               ;;
@@ -1058,6 +1083,8 @@ PROJCTX
                 IFS= read -r local_clr_ans || local_clr_ans="n"
                 if [[ "$local_clr_ans" =~ ^[Yy]$ ]]; then
                   rm -f ~/.ai-os/current-project
+                  rm -f ~/.ai-os/current-plan
+                  SYSTEM_PROMPT=$(_build_system_prompt)
                   echo "Projekt vymazaný."
                 else
                   echo "Zrušené."
@@ -1068,11 +1095,12 @@ PROJCTX
               ;;
             set\ *)
               local_proj_path="${local_proj_sub#set }"
-              if [[ "$local_proj_path" = "$HOME"* && -f "$local_proj_path/ds.md" ]]; then
+              if [[ -d "$local_proj_path" && -f "$local_proj_path/ds.md" ]]; then
                 printf '%s\n' "$local_proj_path" > ~/.ai-os/current-project
+                cd "$local_proj_path" 2>/dev/null || true
                 echo "Projekt nastavený: $local_proj_path"
               else
-                echo "Chyba: cesta musí byť v $HOME a obsahovať ds.md" >&2
+                echo "Chyba: cesta musí obsahovať ds.md" >&2
               fi
               ;;
             *)
@@ -1162,6 +1190,71 @@ WSDSEOF
           local_compressed=$(compress_history "$CONV") || { echo "Komprimácia zlyhala."; continue; }
           CONV="$local_compressed"
           echo "Konverzácia komprimovaná. Správy: $(jq 'length' <<< "$CONV")"
+          ;;
+        "/plan save"*)
+          local_plan_save_arg="${INPUT#/plan save}"
+          local_plan_save_arg="${local_plan_save_arg# }"
+          # Default save path: project dir/plan.md or ~/.ai-os/sessions/plan.md
+          if [[ -z "$local_plan_save_arg" ]]; then
+            if [[ -f ~/.ai-os/current-project ]]; then
+              local_plan_save_arg="$(< ~/.ai-os/current-project)/plan.md"
+              local_plan_save_arg="${local_plan_save_arg%$'\n'}"
+            else
+              local_plan_save_arg="$HOME/.ai-os/sessions/plan.md"
+            fi
+          fi
+          # Resolve ~ if present
+          [[ "$local_plan_save_arg" = "~"* ]] && local_plan_save_arg="$HOME${local_plan_save_arg#\~}"
+          if [[ -f "$AI_TMP/last_stream.txt" && -s "$AI_TMP/last_stream.txt" ]]; then
+            mkdir -p "$(dirname "$local_plan_save_arg")"
+            cp "$AI_TMP/last_stream.txt" "$local_plan_save_arg" \
+              && printf '%s\n' "$local_plan_save_arg" > ~/.ai-os/current-plan \
+              && SYSTEM_PROMPT=$(_build_system_prompt) \
+              && printf 'Plán uložený: %s\n' "$local_plan_save_arg" \
+              || printf 'Chyba: zápis zlyhal\n' >&2
+          else
+            printf 'Chyba: žiadna posledná odpoveď na uloženie. Najprv vytvor plán pomocou /plan.\n' >&2
+          fi
+          local_skip_api=true
+          ;;
+        "/plan load "*|"/plan load")
+          local_plan_load_arg="${INPUT#/plan load}"
+          local_plan_load_arg="${local_plan_load_arg# }"
+          [[ "$local_plan_load_arg" = "~"* ]] && local_plan_load_arg="$HOME${local_plan_load_arg#\~}"
+          if [[ -z "$local_plan_load_arg" ]]; then
+            printf 'Použitie: /plan load <cesta>\n' >&2
+          elif [[ ! -f "$local_plan_load_arg" ]]; then
+            printf 'Chyba: súbor neexistuje: %s\n' "$local_plan_load_arg" >&2
+          else
+            printf '%s\n' "$local_plan_load_arg" > ~/.ai-os/current-plan
+            SYSTEM_PROMPT=$(_build_system_prompt)
+            printf 'Plán načítaný: %s\n' "$local_plan_load_arg"
+          fi
+          local_skip_api=true
+          ;;
+        "/plan clear")
+          if [[ -f ~/.ai-os/current-plan ]]; then
+            rm -f ~/.ai-os/current-plan
+            SYSTEM_PROMPT=$(_build_system_prompt)
+            printf 'Aktívny plán zrušený.\n'
+          else
+            printf '(žiadny aktívny plán)\n'
+          fi
+          local_skip_api=true
+          ;;
+        "/plan show")
+          if [[ -f ~/.ai-os/current-plan ]]; then
+            local_plan_show=$(< ~/.ai-os/current-plan); local_plan_show="${local_plan_show%$'\n'}"
+            printf 'Aktívny plán: %s\n\n' "$local_plan_show"
+            if [[ -f "$local_plan_show" ]]; then
+              cat "$local_plan_show"
+            else
+              printf '(súbor neexistuje)\n' >&2
+            fi
+          else
+            printf '(žiadny aktívny plán — použi /plan save po vygenerovaní plánu)\n'
+          fi
+          local_skip_api=true
           ;;
         /plan)
           # Multiline mode: collect lines until lone '.'
@@ -1269,6 +1362,10 @@ WSDSEOF
           printf '/reset           vymaže históriu aktuálnej konverzácie\n'
           printf '/compact         komprimuje konverzáciu (zachová kontext)\n'
           printf '/plan            ďalšia správa = výstup ako plán (nie implementácia)\n'
+          printf '/plan save [p]   uloží posledný plán do súboru a nastaví ako aktívny\n'
+          printf '/plan load <p>   načíta existujúci plán ako aktívny kontext\n'
+          printf '/plan clear      zruší aktívny plán\n'
+          printf '/plan show       zobrazí aktívny plán\n'
           printf '/batch <súbor>   spustí prompty zo súboru sekvenčne\n'
           printf '/save [meno]     uloží konverzáciu do named session\n'
           printf '/load [meno]     načíta named session\n'

@@ -928,6 +928,8 @@ if [[ "$MODE" = "interactive" ]]; then
   bind -x '"\t": __ai_tab' 2>/dev/null || true
   bind 'set enable-bracketed-paste on' 2>/dev/null || true
 
+  trap '_stop_spinner; _stop_esc_monitor' EXIT
+
   echo "AI-OS  •  $MODEL  •  /help pre príkazy  •  Ctrl+C na ukončenie"
   echo "────────────────────────────────────────────────────────────────"
   trap 'true' INT  # not '' — readline needs non-SIG_IGN to install its SIGINT handler

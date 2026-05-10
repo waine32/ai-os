@@ -103,7 +103,13 @@ AGENT_TOOLS=$(jq -cn '[
     "parameters":{"type":"object","properties":{
       "type":{"type":"string","enum":["status","diff","log","branch"],
               "description":"status=short status, diff=unstaged diff, log=recent commits, branch=current branch"}
-    },"required":["type"]}}}
+    },"required":["type"]}}},
+  {"type":"function","function":{"name":"save_plan",
+    "description":"Persist the current plan to disk so it survives session restarts. Pre-approved — call this immediately after creating or updating a plan. The plan is injected into every future system prompt automatically.",
+    "parameters":{"type":"object","properties":{
+      "content": {"type":"string","description":"Full plan content in markdown"},
+      "name":    {"type":"string","description":"Short slug for the plan file, e.g. 'ci-mvp' or 'refactor' (alphanumeric + hyphens)"}
+    },"required":["content","name"]}}}
 ]')
 
 FLASH_INTERACTIVE_TOOLS=$(jq -cn --argjson a "$SHELL_TOOL" --argjson b "$AGENT_TOOLS" '$a + $b')
@@ -611,6 +617,22 @@ _tool_git_info() {
   esac
 }
 
+_tool_save_plan() {
+  local _args="$1"
+  local _content _name _path
+  _content=$(jq -r '.content // empty' <<< "$_args")
+  _name=$(jq -r '.name // "plan"' <<< "$_args")
+  [[ -z "$_content" ]] && printf 'Error: content required' && return
+  _name=$(printf '%s' "$_name" | tr -cd 'a-zA-Z0-9_-' | cut -c1-50)
+  [[ -z "$_name" ]] && _name="plan"
+  mkdir -p "$HOME/.ai-os/plans"
+  _path="$HOME/.ai-os/plans/${_name}.md"
+  printf '%s\n' "$_content" > "$_path" \
+    && printf '%s' "$_path" > "$HOME/.ai-os/current-plan" \
+    && printf 'Plán uložený: %s' "$_path" \
+    || printf 'Error: zápis plánu zlyhal'
+}
+
 _colorize_diff() {
   while IFS= read -r _dl; do
     case "$_dl" in
@@ -642,6 +664,7 @@ _handle_tool_call() {
     write_file)   _result=$(_tool_write_file "$_fa") ;;
     grep_search)  _result=$(_tool_grep_search "$_fa") ;;
     git_info)     _result=$(_tool_git_info "$_fa") ;;
+    save_plan)    _result=$(_tool_save_plan "$_fa") ;;
     *)            _result="Error: unknown tool '${_fn}'" ;;
   esac
   printf '%s' "$_result"
@@ -819,6 +842,11 @@ if [[ "$MODE" = "interactive" ]]; then
       _changes=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
       _ctx+=$'\n'"Git: branch=${_branch}"
       [[ "$_changes" -gt 0 ]] && _ctx+=", ${_changes} zmenených" || _ctx+=", čistý"
+    fi
+    if [[ -f "$HOME/.ai-os/current-plan" ]]; then
+      local _rcp
+      _rcp=$(< "$HOME/.ai-os/current-plan"); _rcp="${_rcp%$'\n'}"
+      [[ -f "$_rcp" ]] && _ctx+=$'\n'"Aktívny plán: $_rcp (read_file pre obsah)"
     fi
     printf '%s' "$_ctx"
   }

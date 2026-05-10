@@ -1342,6 +1342,49 @@ MOCKCURL
   [[ "$output" == *"test response"* ]]
 }
 
+# ── save_plan tool ───────────────────────────────────────────────────────────
+
+@test "save_plan tool writes plan file and sets current-plan pointer" {
+  local plan_name="test-plan-$$"
+  local plan_path="$HOME/.ai-os/plans/${plan_name}.md"
+  rm -f "$plan_path" "$HOME/.ai-os/current-plan"
+
+  _tool_call_mock "save_plan" "{\"content\":\"# Plan\\nStep 1\",\"name\":\"$plan_name\"}" "saved"
+  run bash -c "printf 'save it\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f "$plan_path" ]
+  [[ "$(< "$plan_path")" == *"Step 1"* ]]
+  [[ "$(< "$HOME/.ai-os/current-plan")" == "$plan_path" ]]
+
+  rm -f "$plan_path"
+}
+
+@test "save_plan tool sanitizes name to alphanumeric-hyphens" {
+  local plan_path="$HOME/.ai-os/plans/my-plan.md"
+  rm -f "$plan_path" "$HOME/.ai-os/current-plan"
+
+  _tool_call_mock "save_plan" '{"content":"content","name":"my plan! @#$"}' "saved"
+  run bash -c "printf 'save\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [ -f "$HOME/.ai-os/plans/myplan.md" ] || [ -f "$plan_path" ]
+
+  rm -f "$HOME/.ai-os/plans/myplan.md" "$plan_path"
+}
+
+@test "pro payload includes save_plan tool" {
+  _payload_capture_mock
+  run "$AI_SCRIPT" pro "hello"
+  [ "$status" -eq 0 ]
+  [[ "$(< /tmp/curl_payload.json)" == *"save_plan"* ]]
+}
+
+@test "flash interactive payload includes save_plan tool" {
+  _payload_capture_mock
+  run bash -c "printf 'hello\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$(< /tmp/curl_payload.json)" == *"save_plan"* ]]
+}
+
 # ── Diff viewer ───────────────────────────────────────────────────────────────
 
 @test "write_file cancelled still shows new file label in tool result" {

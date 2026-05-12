@@ -131,3 +131,53 @@ Zdokumentované rozhodnutia s alternatívami a dôvodmi. Slúži ako referencia 
 **Alternatívy:** Vyžadovať potvrdenie, manuálne `/plan save`
 
 **Dôvod:** Plán je textový výstup bez side-effectov na kód alebo systém — rizikovosť je nízka. Potvrdenie by prerušilo flow (model práve dokončil plánovanie). Cesta sa sanitizuje na `[a-zA-Z0-9_-]` a injektuje sa do runtime kontextu pri ďalšej správe — model vie kde plán nájsť aj po reštarte session.
+
+---
+
+## `_select_option` — interaktívny výber s arrow keys
+
+**Rozhodnutie:** Všetky confirmation prompty používajú `_select_option` namiesto `read [y/N]`. Možnosti sa prepínajú šípkami (←/→/↑/↓), Enter potvrdí. Vybraná možnosť je zvýraznená inverzným textom.
+
+**Alternatívy:** `read [y/N]`, `fzf`, `select` builtin
+
+**Dôvod:** `_select_option` poskytuje konzistentné UX naprieč všetkými promptmi. Arrow key navigácia je intuitívnejšia ako písanie Y/N. Podporuje viac ako 2 možnosti (napr. "Áno", "Nie", "Vždy Áno (táto session)"). Predvolená možnosť je vždy prvá (Áno). Fallback na prvú možnosť keď `/dev/tty` nie je k dispozícii.
+
+---
+
+## ESC interrupt redesign: SIGINT → SIGUSR1
+
+**Rozhodnutie:** ESC monitor posiela `SIGUSR1` namiesto `SIGINT` na prerušenie API volania.
+
+**Alternatívy:** `SIGINT` (pôvodný stav), `SIGTERM`, pipe-based interrupt
+
+**Dôvod:** `SIGINT` spôsoboval kolízie s readline — keď ESC prišlo počas `read -er`, readline interpretovalo SIGINT ako Ctrl+C a ukončilo prompt. `SIGUSR1` je user-defined signál, ktorý readline ignoruje. Skript ho zachytáva len počas API volania (`trap '_AI_INTERRUPTED=1' USR1`), po skončení sa trap resetuje na `''`.
+
+---
+
+## Plan persistence: `/plan progress`, `/plan history`, `/plan continue`
+
+**Rozhodnutie:** Plány majú timestampované názvy (`plan-20260512_234835.md`), progress tracking cez `.meta.json` súbory, a `/plan continue` vloží celý plán do promptu.
+
+**Alternatívy:** Jeden súbor bez verzovania, progress v názve súboru
+
+**Dôvod:** Timestampy umožňujú `/plan history` zobraziť všetky verzie. `.meta.json` je oddelený od obsahu plánu — nemení git diff. `/plan continue` je robustnejší ako spoliehať sa na modelovu pamäť — plán je explicitne v prompte.
+
+---
+
+## Farebná schéma: light blue, orange, dark bg pre diff
+
+**Rozhodnutie:** `_C_CMD` = light blue (117), `_C_ERR` = orange (208), `_C_BG_ADD` = dark green bg + white text, `_C_BG_DEL` = wine-red bg, `_C_BG_USER` = dark gray bg.
+
+**Alternatívy:** Pôvodné farby (yellow, red, green/red bg)
+
+**Dôvod:** Oranžová na príkazoch bola ťažko čitateľná — light blue je lepší kontrast. Červená na chybách bola príliš agresívna — orange je menej rušivá. Dark green/wine-red pozadie pre diff riadky je konzistentné s GitHub diff stylingom. Dark gray pozadie pre user input v histórii vizuálne oddeľuje otázky od odpovedí.
+
+---
+
+## `[pro...]` animácia — single line s vymazaním
+
+**Rozhodnutie:** `[pro...]` sa zobrazí na jednom riadku a po dokončení sa vymaže `\r\033[K`.
+
+**Alternatívy:** Viacero riadkov `[pro...]`, žiadny indikátor
+
+**Dôvod:** Viacero riadkov `[pro...]` (jeden pre každú delegáciu) vytváralo zbytočný vizuálny šum. Single line s vymazaním je čistejšie — používateľ vidí len spinner a tool výstupy.

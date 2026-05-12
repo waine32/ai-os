@@ -877,7 +877,7 @@ if [[ "$MODE" = "interactive" ]]; then
   # Warp OSC 133 shell integration
   WARP=""
   [[ "${TERM_PROGRAM:-}" == "WarpTerminal" ]] && WARP=true
-  warp_seq() { [[ -n "$WARP" ]] && printf '\033]133;%s\007' "$1"; }
+  warp_seq() { [[ -n "$WARP" ]] && printf '\033]133;%s\007' "$1" || true; }
 
   # ESC interrupt helpers
   _ESC_PID=""

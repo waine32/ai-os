@@ -26,6 +26,13 @@
 | `save_plan` tool | Model uloží plán do `~/.ai-os/plans/`; survives session restart |
 | `/plan save/load/clear/show` | Manuálna správa aktívneho plánu |
 | `read_file` / `grep_search` / `git_info` tools | Rozšírený tool layer pre flash interactive aj pro |
+| `_select_option` | Interaktívny výber s arrow keys namiesto `read [y/N]` |
+| ESC interrupt redesign | SIGINT → SIGUSR1 — ESC už nekoliduje s readline |
+| Plan persistence | `/plan progress`, `/plan history`, `/plan continue` + timestampované plány |
+| Farebná schéma | Light blue príkazy, orange chyby, dark bg diff, dark gray user input |
+| `[pro...]` animácia | Single line s vymazaním namiesto viacerých riadkov |
+| `_print_response` | `□` prefix v interactive móde, passthrough v stateless |
+| `warp_seq` crash fix | `|| true` guard pre `set -e` kompatibilitu |
 
 ---
 

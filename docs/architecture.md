@@ -90,13 +90,13 @@ Rovnaká štruktúra ako `run_agentic`, ale:
 - Výstup cez `_print_response` (pridáva `□` prefix v interactive mode)
 
 ### `_exec_shell_tool(cmd, reason)`
-Zobrazí príkaz farebne, vypýta `[y/N]` z `/dev/tty` (ak je stderr TTY), spustí cez `bash -c`. Default = N (bezpečný default).
+Zobrazí príkaz farebne, vypýta potvrdenie cez `_select_option` (arrow keys), spustí cez `bash -c`. Default = Áno (prvá možnosť). Podporuje "Vždy Áno (táto session)" — nastaví `SHELL_AUTO_APPROVE="on"`.
 
 ### `_tool_write_file(args)` — s diff viewerom
-Pred [y/N] promptom zobrazí:
+Pred `_select_option` promptom zobrazí:
 - existujúci súbor: `diff -u` (max 80 riadkov) sfarbený cez `_colorize_diff()`
 - nový súbor: `(nový súbor — N B)`
-Potvrdenie cez `/dev/tty` s TTY guardom (`[[ -t 2 ]]`).
+Potvrdenie cez `_select_option` s možnosťou "Áno a nezobrazovať diff nabudúce".
 
 ### `_tool_save_plan(args)` — pre-approved
 Zapíše `content` do `~/.ai-os/plans/<name>.md`, aktualizuje `~/.ai-os/current-plan` pointer. Automaticky načítaný do `_runtime_context()` pri ďalšej správe.

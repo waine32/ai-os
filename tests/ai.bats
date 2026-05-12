@@ -1346,29 +1346,33 @@ MOCKCURL
 
 @test "save_plan tool writes plan file and sets current-plan pointer" {
   local plan_name="test-plan-$$"
-  local plan_path="$HOME/.ai-os/plans/${plan_name}.md"
-  rm -f "$plan_path" "$HOME/.ai-os/current-plan"
+  rm -f "$HOME/.ai-os/plans/${plan_name}"*.md "$HOME/.ai-os/current-plan"
 
   _tool_call_mock "save_plan" "{\"content\":\"# Plan\\nStep 1\",\"name\":\"$plan_name\"}" "saved"
   run bash -c "printf 'save it\nexit\n' | '$AI_SCRIPT' flash --interactive"
   [ "$status" -eq 0 ]
-  [ -f "$plan_path" ]
-  [[ "$(< "$plan_path")" == *"Step 1"* ]]
-  [[ "$(< "$HOME/.ai-os/current-plan")" == "$plan_path" ]]
+  # Filename includes timestamp suffix, e.g. test-plan-12345-20250513_001629.md
+  local plan_file
+  plan_file=$(ls "$HOME/.ai-os/plans/${plan_name}"*.md 2>/dev/null | head -1)
+  [ -n "$plan_file" ]
+  [[ "$(< "$plan_file")" == *"Step 1"* ]]
+  [[ "$(< "$HOME/.ai-os/current-plan")" == "$plan_file" ]]
 
-  rm -f "$plan_path"
+  rm -f "$plan_file"
 }
 
 @test "save_plan tool sanitizes name to alphanumeric-hyphens" {
-  local plan_path="$HOME/.ai-os/plans/my-plan.md"
-  rm -f "$plan_path" "$HOME/.ai-os/current-plan"
+  rm -f "$HOME/.ai-os/plans/myplan"*.md "$HOME/.ai-os/current-plan"
 
   _tool_call_mock "save_plan" '{"content":"content","name":"my plan! @#$"}' "saved"
   run bash -c "printf 'save\nexit\n' | '$AI_SCRIPT' flash --interactive"
   [ "$status" -eq 0 ]
-  [ -f "$HOME/.ai-os/plans/myplan.md" ] || [ -f "$plan_path" ]
+  # Sanitized name is "myplan" with timestamp suffix
+  local plan_file
+  plan_file=$(ls "$HOME/.ai-os/plans/myplan"*.md 2>/dev/null | head -1)
+  [ -n "$plan_file" ]
 
-  rm -f "$HOME/.ai-os/plans/myplan.md" "$plan_path"
+  rm -f "$plan_file"
 }
 
 @test "pro payload includes save_plan tool" {

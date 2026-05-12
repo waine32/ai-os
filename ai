@@ -504,9 +504,9 @@ _select_option() {
   local _so_selected=0
   local _so_key _so_i
 
-  # Fallback if no TTY
+  # Fallback if no TTY — return last option (typically "Nie" or the safest default)
   if [[ ! -t 2 ]]; then
-    printf '%s\n' "${_so_options[0]}"
+    printf '%s\n' "${_so_options[-1]}"
     return
   fi
 
@@ -686,13 +686,23 @@ _tool_write_file() {
 
 _tool_grep_search() {
   local _args="$1"
-  local _pattern _path _opts
+  local _pattern _path _opts _safe_opts
   _pattern=$(jq -r '.pattern // empty' <<< "$_args")
   _path=$(jq -r '.path // "."' <<< "$_args")
   _opts=$(jq -r '.options // ""' <<< "$_args")
   [[ -z "$_pattern" ]] && printf 'Error: pattern required' && return
+  # Sanitize options: only allow safe flags (-i, -l, -w, -r, -n, -I, --exclude-dir=, --include=)
+  _safe_opts=""
+  for _o in $_opts; do
+    case "$_o" in
+      -i|-l|-w|-r|-n|-I) _safe_opts+=" $_o" ;;
+      --exclude-dir=*)   _safe_opts+=" $_o" ;;
+      --include=*)       _safe_opts+=" $_o" ;;
+      *) : ;; # silently drop unsafe flags
+    esac
+  done
   # shellcheck disable=SC2086
-  grep -rn ${_opts} "$_pattern" "$_path" 2>&1 | head -100
+  grep -rn ${_safe_opts} "$_pattern" "$_path" 2>&1 | head -100
 }
 
 _tool_git_info() {
@@ -1278,9 +1288,13 @@ PROJCTX
             set\ *)
               local_proj_path="${local_proj_sub#set }"
               if [[ -d "$local_proj_path" && -f "$local_proj_path/ds.md" ]]; then
-                printf '%s\n' "$local_proj_path" > ~/.ai-os/current-project
-                cd "$local_proj_path" 2>/dev/null || true
-                echo "Projekt nastavený: $local_proj_path"
+                if [[ "$local_proj_path" != "$HOME"* ]]; then
+                  echo "Chyba: cesta musí byť v rámci domovského adresára." >&2
+                else
+                  printf '%s\n' "$local_proj_path" > ~/.ai-os/current-project
+                  cd "$local_proj_path" 2>/dev/null || true
+                  echo "Projekt nastavený: $local_proj_path"
+                fi
               else
                 echo "Chyba: cesta musí obsahovať ds.md" >&2
               fi
@@ -1561,7 +1575,7 @@ Pokračuj presne tam, kde si skončil. Nezačínaj odznova."
             echo "Použitie: /batch <súbor>  (každý riadok = jeden prompt)"
           else
             # Security: restrict batch to files within user's home directory
-            local_file=$(realpath -m "$local_file" 2>/dev/null || echo "$local_file")
+            local_file=$(realpath "$local_file" 2>/dev/null || echo "$local_file")
             if [[ "$local_file" != "$HOME"* ]]; then
               echo "Chyba: /batch povolený len v rámci domovského adresára." >&2
             else

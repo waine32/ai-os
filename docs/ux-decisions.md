@@ -24,13 +24,13 @@ Zdokumentované rozhodnutia s alternatívami a dôvodmi. Slúži ako referencia 
 
 ---
 
-## stdin pre confirmácie, nie `/dev/tty`
+## `/dev/tty` pre tool confirmácie (s TTY guardom)
 
-**Rozhodnutie:** Všetky `[y/N]` confirmácie (`read -r`) čítajú zo stdin, nie `</dev/tty`.
+**Rozhodnutie:** Tool confirmácie (`_exec_shell_tool`, `_tool_write_file`) čítajú z `/dev/tty` keď `[[ -t 2 ]]`, inak default `n`.
 
-**Alternatívy:** `/dev/tty` — číta priamo z terminálu bez ohľadu na pipes
+**Alternatívy:** stdin — konzumovalo by promptový vstup; `/dev/tty` bez guardu — hanglo by v pipe/bats kontexte
 
-**Dôvod:** Testy používajú piped stdin (`printf '...' | ai flash --interactive`). `/dev/tty` by confirmácie nečítalo z pipe, Y/N by konzumoval hlavný loop a posielal ako prompt modelu. stdin umožňuje testy bez terminálového kontextu a v reálnom použití stdin == terminál.
+**Dôvod:** Tool handlery sú volané z `$()` subshell kontextu — stdin je v tomto momente súbežne konzumovaný hlavnou slučkou. `/dev/tty` číta priamo z terminálu bez ohľadu na pipe stav. Guard `[[ -t 2 ]]` zachová automatické `n` v testoch a pipe kontexte kde terminál nie je dostupný.
 
 ---
 
@@ -81,3 +81,53 @@ Zdokumentované rozhodnutia s alternatívami a dôvodmi. Slúži ako referencia 
 **Alternatívy:** Len globálne súbory (pôvodný stav)
 
 **Dôvod:** Po pridaní workspace a projekt vrstiev sa `/memory` stalo neúplné — nezobrazovalo čo model skutočne dostal. Používateľ nemohol overiť či workspace/projekt kontext bol správne načítaný.
+
+---
+
+## Spinner (thinking indicator)
+
+**Rozhodnutie:** `_start_spinner` / `_stop_spinner` okolo každého `ask()` volania v `run_agentic` aj `run_interactive_flash`.
+
+**Alternatívy:** Statický `[pro...]` text, bez indikátora
+
+**Dôvod:** Po odmietnutí [y/N] nebolo vidieť že model znovu pracuje. Spinner na stderr je súbežný s streamovaným výstupom na stdout — nezasahujú si. Stubs mimo interactive módu — bezpečné volať všade. `disown` po štarte zabraňuje "Terminated: 15" notifikáciám pri `kill`.
+
+---
+
+## Diff viewer pre `write_file`
+
+**Rozhodnutie:** Pred [y/N] potvrdením `write_file` sa zobrazí `diff -u` (existujúci súbor) alebo byte count (nový súbor).
+
+**Alternatívy:** Zobraziť celý nový obsah, žiadny preview
+
+**Dôvod:** Celý nový obsah je zbytočný hluk pre veľké súbory. `diff -u` ukazuje presne čo sa mení — rovnaký UX ako v Claude Code. `head -80` obmedzuje výstup. `mktemp` namiesto `<(...)` — macOS bash 3.2 má problémy s process substitution v niektorých kontextoch.
+
+---
+
+## Farby + `NO_COLOR`
+
+**Rozhodnutie:** ANSI farby sú zapnuté keď `[[ -t 2 && -z "${NO_COLOR:-}" ]]`, inak prázdne konštanty.
+
+**Alternatívy:** Vždy farby, externá konfigurácia
+
+**Dôvod:** Testy bežia cez pipe — `_C_*` sú prázdne, assertions prechádzajú bez ANSI šumu. `NO_COLOR` je priemyselný štandard (no-color.org). Pozadie namiesto textu pre diff riadky — zachová pôvodnú farbu textu v tmavých aj svetlých termináloch.
+
+---
+
+## `□` prefix na výstupe modelu
+
+**Rozhodnutie:** Každý riadok odpovede modelu v interactive móde začína `□ ` (U+25A1 biely štvorček).
+
+**Alternatívy:** `ai:` prefix, farebné ohraničenie, žiadny marker
+
+**Dôvod:** Vytvorí konzistentný vizuálny stĺpec odlišujúci model output od UI elementov (spinners, tool výstupy, prompty). Prázdny štvorček = "nevyplnené" → slúži ako checkbox stĺpec pre budúce použitie. Implementovaný cez `sed "s/^/□ /"` v `_print_response()` — no-op stub v neinteraktívnom móde zachová čistý stdout pre piping.
+
+---
+
+## `save_plan` ako pre-approved tool
+
+**Rozhodnutie:** `save_plan` je v toolsete bez Y/N potvrdenia — model ho môže volať okamžite po vytvorení plánu.
+
+**Alternatívy:** Vyžadovať potvrdenie, manuálne `/plan save`
+
+**Dôvod:** Plán je textový výstup bez side-effectov na kód alebo systém — rizikovosť je nízka. Potvrdenie by prerušilo flow (model práve dokončil plánovanie). Cesta sa sanitizuje na `[a-zA-Z0-9_-]` a injektuje sa do runtime kontextu pri ďalšej správe — model vie kde plán nájsť aj po reštarte session.

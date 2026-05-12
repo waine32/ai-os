@@ -1396,3 +1396,27 @@ MOCKCURL
   [[ "$output" == *"nový súbor"* ]]
   rm -f "$new_file"
 }
+
+# ── □ prefix ──────────────────────────────────────────────────────────────────
+
+@test "flash interactive output lines are prefixed with □" {
+  MOCK_CURL_RESPONSE='{"choices":[{"message":{"content":"line one\nline two\nline three"},"finish_reason":"stop"}]}'
+  export MOCK_CURL_RESPONSE
+
+  run bash -c "printf 'hello\nexit\n' | '$AI_SCRIPT' flash --interactive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"□ line one"* ]]
+  [[ "$output" == *"□ line two"* ]]
+  [[ "$output" == *"□ line three"* ]]
+}
+
+@test "_print_response is passthrough in non-interactive mode" {
+  MOCK_CURL_RESPONSE='{"choices":[{"message":{"content":"plain output"},"finish_reason":"stop"}]}'
+  export MOCK_CURL_RESPONSE
+
+  run "$AI_SCRIPT" flash "test"
+  [ "$status" -eq 0 ]
+  # No □ prefix in one-shot mode
+  [[ "$output" != *"□"* ]]
+  [[ "$output" == *"plain output"* ]]
+}

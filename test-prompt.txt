@@ -1,0 +1,104 @@
+You are a bash testing expert. Write a complete test suite for the following bash CLI script using bats-core (Bash Automated Testing System).
+
+--- SCRIPT: ai ---
+#!/bin/bash
+
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: ai [flash|pro] [--session] \"prompt\"" >&2
+  exit 1
+fi
+
+MODEL="$1"; shift
+
+MODE="stateless"
+if [[ "${1:-}" = "--session" ]]; then
+  MODE="session"; shift
+fi
+
+PROMPT="${*:-}"
+if [[ -z "$PROMPT" ]]; then
+  echo "Error: prompt is required" >&2
+  exit 1
+fi
+
+case "$MODEL" in
+  flash)
+    MODEL_NAME="deepseek-chat"
+    ;;
+  pro)
+    MODEL_NAME="deepseek-reasoner"
+    ;;
+  *)
+    echo "Usage: ai [flash|pro] [--session] \"prompt\"" >&2
+    exit 1
+    ;;
+esac
+
+ENDPOINT="https://api.deepseek.com/chat/completions"
+API_KEY="${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is not set}"
+TEMPERATURE="${AI_TEMPERATURE:-0}"
+
+MEMORY=""
+if [[ -f ~/.ai-os/context/global.md ]]; then
+  MEMORY=$(< ~/.ai-os/context/global.md)
+fi
+
+SYSTEM_PROMPT="You are a deterministic CLI assistant. Memory context:
+$MEMORY"
+
+USER_CONTENT="$PROMPT"
+if [[ "$MODE" = "session" ]] && [[ -f ~/.ai-os/sessions/history.txt ]]; then
+  HISTORY=$(< ~/.ai-os/sessions/history.txt)
+  USER_CONTENT="${HISTORY}
+USER: ${PROMPT}"
+fi
+
+PAYLOAD=$(jq -n \
+  --arg model    "$MODEL_NAME" \
+  --arg system   "$SYSTEM_PROMPT" \
+  --arg user     "$USER_CONTENT" \
+  --argjson temp "$TEMPERATURE" \
+  '{model: $model, messages: [{role:"system",content:$system},{role:"user",content:$user}], temperature: $temp}')
+
+RESPONSE=$(curl -s "$ENDPOINT" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $API_KEY" \
+  -d "$PAYLOAD")
+
+echo "$RESPONSE" > /tmp/ai_last_output.txt
+
+OUTPUT=$(jq -r '.choices[0].message.content // empty' /tmp/ai_last_output.txt)
+
+if [[ -z "$OUTPUT" ]]; then
+  echo "Error: $(jq -r '.error.message // "no output – see /tmp/ai_last_output.txt"' /tmp/ai_last_output.txt)" >&2
+  exit 1
+fi
+
+echo "$OUTPUT"
+
+if [[ "$MODE" = "session" ]]; then
+  mkdir -p ~/.ai-os/sessions
+  printf 'USER: %s\nASSISTANT: %s\n' "$PROMPT" "$OUTPUT" >> ~/.ai-os/sessions/history.txt
+fi
+--- END SCRIPT ---
+
+Requirements for the test suite:
+
+1. Use bats-core syntax (@test, run, assert_output, assert_failure, etc.)
+2. Mock `curl` using a bash function in setup() so no real HTTP calls are made. The mock should return a valid DeepSeek-style JSON response: {"choices":[{"message":{"content":"test response"}}]}
+3. Mock `~/.ai-os/context/global.md` using a temp directory (use BATS_TEST_TMPDIR), not the real home directory.
+4. Cover these cases:
+   - No arguments → exits 1, prints usage to stderr
+   - Unknown model → exits 1, prints usage to stderr
+   - Missing DEEPSEEK_API_KEY → exits 1 with clear error
+   - Missing prompt (model only, no text) → exits 1
+   - flash model → succeeds, outputs mocked response
+   - pro model → succeeds, outputs mocked response
+   - --session flag → history file is created and appended correctly
+   - Prompt with quotes and special characters (JSON safety) → does not crash
+   - API returns error JSON → exits 1 and prints the error message
+   - AI_TEMPERATURE env var is respected (verify it appears in the jq-built payload)
+5. In teardown(), clean up any temp files created.
+6. Output ONLY the complete .bats file, no explanation. Save it as tests/ai.bats.

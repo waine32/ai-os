@@ -65,12 +65,19 @@ Both hit `https://api.deepseek.com/chat/completions`.
 
 ## Model tool support
 
-In interactive mode, both models have access to the `run_shell` tool:
+In interactive mode, models have access to these tools:
 
-- **Flash** — handled by `run_interactive_flash()` (blocking, non-streaming). When the model calls `run_shell`, the user is shown the command and asked to confirm before execution.
-- **Pro** — handled by `run_agentic()`. Has both `delegate_to_flash` (submodel delegation) and `run_shell`. Same confirmation prompt before execution.
+| Tool | Flash | Pro | Approval |
+|------|-------|-----|----------|
+| `read_file` | ✓ | ✓ | auto |
+| `write_file` | ✓ | ✓ | always [y/N] |
+| `grep_search` | ✓ | ✓ | auto |
+| `git_info` | ✓ | ✓ | auto |
+| `run_shell` | ✓ | ✓ | per `/auto` mode |
+| `save_plan` | ✓ | ✓ | auto (pre-approved) |
+| `delegate_to_flash` | — | ✓ | auto |
 
-Security: commands are always shown to the user with a `[y/N]` prompt. Default is `N` (no execution).
+`write_file` shows a `diff -u` before the [y/N] prompt. For new files it shows the byte count. Confirmation reads from `/dev/tty` when stderr is a TTY; defaults to `n` otherwise (pipes, tests).
 
 ## Shell passthrough
 
@@ -93,17 +100,24 @@ Entered as `/command` in the interactive prompt. No API call is made; handled lo
 | `/reset` | Clear conversation history (does not affect memory or session files) |
 | `/compact` | Compress conversation history while preserving context |
 | `/plan` | Next message outputs only a structured plan, no implementation |
+| `/plan save [path]` | Save last response as active plan to disk; sets `~/.ai-os/current-plan` pointer |
+| `/plan load <path>` | Load an existing plan as active context; injects path into runtime context |
+| `/plan clear` | Clear the active plan pointer |
+| `/plan show` | Print the active plan file contents |
 | `/batch <file>` | Run prompts from file sequentially (one per line, ignores comments with `#`) |
 | `/save [name]` | Save current conversation to a named session |
 | `/load [name]` | Load a previously saved named session |
 | `/model [flash\|pro]` | Switch between models. Pro delegates subtasks to Flash and can run shell commands via `run_shell` tool. |
 | `/memory` | Display contents of loaded context files (instructions, memory, context) |
+| `/memory add <text>` | Quick append to `~/.ai-os/memory.md` |
+| `/memory edit [key]` | Open a context file in `$EDITOR`; keys: `instructions`, `memory`, `context`, `ws`, `ws-instructions`, `ws-memory`, `ws-context`, `proj` |
 | `/workspace [path]` | Set the Workspace folder. Creates `ds.md` (meta-guide) and `memory/` with `instructions.md`, `memory.md`, `context.md`. Offers interactive editing. |
 | `/project` | Show current project and workspace |
 | `/project new [name]` | Create a new project in the workspace with `ds.md` and `context.md`. Sets it as active. |
 | `/project list` | List all project directories in the workspace (▶ marks active project) |
 | `/project set <path>` | Set active project by path (must be within `$HOME` and contain `ds.md`) |
 | `/project clear` | Clear active project (requires confirmation to prevent accidental removal) |
+| `/auto [on\|safe\|off]` | Shell approval loop: `on` = always auto, `safe` = read-only auto, `off` = always ask |
 | `/clear` | Clear the terminal screen |
 | `/help` | List all slash commands |
 | `/exit` | Exit the interactive session |
@@ -115,6 +129,7 @@ Also exits on `exit`, `quit`, or empty input.
 - `DEEPSEEK_API_KEY` (required) — API key for DeepSeek. Crashes if not set.
 - `AI_TEMPERATURE` (optional, default `0`) — temperature for model sampling.
 - `AI_CONTEXT_LIMIT` (optional, default `6000`) — max estimated tokens for session history before compression.
+- `NO_COLOR` (optional) — disables ANSI colors when set (standard no-color.org).
 
 ## File layout
 
@@ -127,6 +142,8 @@ ds.md                                   # project-level context (this file)
 ~/.ai-os/context.md                     # active context (optional; legacy: context/global.md)
 ~/.ai-os/workspace                      # path to active workspace (set by /workspace command)
 ~/.ai-os/current-project                # path to active project (set by /project new|set)
+~/.ai-os/current-plan                   # path to active plan (set by save_plan tool or /plan save)
+~/.ai-os/plans/<name>.md               # plans saved by model (save_plan) or /plan save
 ~/.ai-os/sessions/history.json          # session mode history (JSON array of objects)
 ~/.ai-os/sessions/interactive_history   # readline history for interactive mode (up-arrow recall)
 ~/.ai-os/sessions/named/<name>.json     # named sessions saved with /save

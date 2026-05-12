@@ -393,17 +393,20 @@ run_agentic() {
   local orig_model="$MODEL" orig_model_name="$MODEL_NAME"
 
   while [[ $delegation_count -le $max_delegations ]]; do
-    printf "${_C_DIM}[pro...]${_C_RESET}\n" >&2
+    # Animated [pro...] — progressive dimming effect
+    printf "${_C_DIM}[pro...]${_C_RESET}" >&2
     _start_spinner
     ask "$messages" false "$PRO_TOOLS" >/dev/null
     _stop_spinner
+    # Clear the [pro...] line after completion
+    printf '\r\033[K' >&2
     local finish_reason
     finish_reason=$(jq -r '.choices[0].finish_reason // "stop"' < "$AI_TMP/last_output.json")
 
     if [[ "$finish_reason" != "tool_calls" ]]; then
       local final_content
       final_content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
-      printf '%s\n' "$final_content"
+      _print_response "$final_content"
       printf '%s' "$final_content" > "$AI_TMP/last_stream.txt"
       SESSION_DELEGATIONS=$((SESSION_DELEGATIONS + delegation_count))
       return 0
@@ -463,24 +466,25 @@ run_agentic() {
   _stop_spinner
   local final_content
   final_content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
-  printf '%s\n' "$final_content"
+  _print_response "$final_content"
   printf '%s' "$final_content" > "$AI_TMP/last_stream.txt"
 }
 
 # ANSI color constants — empty when stderr is not a TTY (pipes, tests, NO_COLOR)
 if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
   _C_RESET='\033[0m'
-  _C_PATH='\033[36m'   # cyan   — paths, files, diff @@ headers
-  _C_CMD='\033[33m'    # yellow — shell commands
-  _C_OK='\033[32m'     # green  — [auto], [safe], success messages
-  _C_ERR='\033[31m'    # red    — errors, [exit N], diff deletions
-  _C_DIM='\033[2m'     # dim    — [pro...], [→ flash:], meta prefixes
-  _C_BOLD='\033[1m'    # bold   — [y/N] confirmation prompts
-  _C_BG_ADD='\033[42m' # green bg — diff added lines
-  _C_BG_DEL='\033[41m' # red bg  — diff removed lines
+  _C_PATH='\033[36m'     # cyan     — paths, files, diff @@ headers
+  _C_CMD='\033[38;5;117m' # light blue — shell commands (was yellow)
+  _C_OK='\033[32m'       # green    — [auto], [safe], success messages
+  _C_ERR='\033[38;5;208m' # orange   — errors, [exit N], diff deletions (was red)
+  _C_DIM='\033[2m'       # dim      — [pro...], [→ flash:], meta prefixes
+  _C_BOLD='\033[1m'      # bold     — confirmation prompts
+  _C_BG_ADD='\033[48;5;22;97m' # dark green bg + white text — diff added lines
+  _C_BG_DEL='\033[48;5;52m'   # wine-red bg — diff removed lines
+  _C_BG_USER='\033[48;5;236m' # dark gray bg — user input in history
 else
   _C_RESET='' _C_PATH='' _C_CMD='' _C_OK='' _C_ERR='' _C_DIM='' _C_BOLD=''
-  _C_BG_ADD='' _C_BG_DEL=''
+  _C_BG_ADD='' _C_BG_DEL='' _C_BG_USER=''
 fi
 
 # no-op stubs — overridden once the interactive session starts
@@ -489,6 +493,85 @@ _start_spinner()     { :; }
 _stop_esc_monitor()  { :; }
 _start_esc_monitor() { :; }
 _colorize_diff()     { :; }
+
+# Interactive option selector: shows options with arrow-key navigation, Enter to confirm.
+# Usage: _select_option "Prompt text?" "Áno" "Nie" ["Tretia možnosť" ...]
+# Returns selected option text via stdout. Falls back to simple read if /dev/tty unavailable.
+_select_option() {
+  local _so_prompt="$1"
+  shift
+  local _so_options=("$@")
+  local _so_selected=0
+  local _so_key _so_i
+
+  # Fallback if no TTY
+  if [[ ! -t 2 ]]; then
+    printf '%s\n' "${_so_options[0]}"
+    return
+  fi
+
+  # Save terminal state
+  local _so_old_stty
+  _so_old_stty=$(stty -g 2>/dev/null || echo "")
+  stty -echo -icanon 2>/dev/null || true
+
+  # Hide cursor
+  printf '\e[?25l' >&2
+
+  _render_options() {
+    local _so_i
+    printf '%s ' "$_so_prompt" >&2
+    for _so_i in "${!_so_options[@]}"; do
+      if [[ "$_so_i" -eq "$_so_selected" ]]; then
+        printf '\033[7m%s\033[0m' "${_so_options[$_so_i]}" >&2
+      else
+        printf '%s' "${_so_options[$_so_i]}" >&2
+      fi
+      if [[ "$_so_i" -lt $((${#_so_options[@]} - 1)) ]]; then
+        printf '  ' >&2
+      fi
+    done
+  }
+
+  _render_options
+
+  while true; do
+    IFS= read -r -s -n 1 _so_key </dev/tty 2>/dev/null || _so_key=""
+    case "$_so_key" in
+      $'\e')
+        # Arrow key sequence: ESC [ A/B/C/D
+        IFS= read -r -s -n 1 -t 0.05 _so_key </dev/tty 2>/dev/null || continue
+        if [[ "$_so_key" == '[' ]]; then
+          IFS= read -r -s -n 1 -t 0.05 _so_key </dev/tty 2>/dev/null || continue
+          case "$_so_key" in
+            'C'|'B')  # Right or Down → next option
+              _so_selected=$(( (_so_selected + 1) % ${#_so_options[@]} ))
+              ;;
+            'D'|'A')  # Left or Up → previous option
+              _so_selected=$(( (_so_selected - 1 + ${#_so_options[@]}) % ${#_so_options[@]} ))
+              ;;
+          esac
+        fi
+        # Redraw
+        printf '\r\033[K' >&2
+        _render_options
+        ;;
+      '')
+        # Enter key
+        printf '\n' >&2
+        break
+        ;;
+    esac
+  done
+
+  # Restore terminal state
+  printf '\e[?25h' >&2
+  if [[ -n "$_so_old_stty" ]]; then
+    stty "$_so_old_stty" 2>/dev/null || true
+  fi
+
+  printf '%s' "${_so_options[$_so_selected]}"
+}
 
 SHELL_AUTO_APPROVE=""  # "" = off | "safe" = auto for read-only | "on" = always auto
 
@@ -529,12 +612,13 @@ _exec_shell_tool() {
   [[ -n "$_reason" ]] \
     && printf "\n[shell] ${_C_CMD}%s${_C_RESET}  # %s\n" "$_cmd" "$_reason" >&2 \
     || printf "\n[shell] ${_C_CMD}%s${_C_RESET}\n" "$_cmd" >&2
-  printf "${_C_BOLD}Spustiť? [y/N]${_C_RESET} " >&2
-  local _ans=""
-  if [[ -t 2 ]]; then
-    IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
-  fi
-  if [[ "$_ans" =~ ^[Yy]$ ]]; then
+  local _so_result
+  _so_result=$(_select_option "Spustiť?" "Áno" "Nie" "Vždy Áno (táto session)")
+  if [[ "$_so_result" == "Áno" ]]; then
+    bash -c "$_cmd" 2>&1 || printf "${_C_ERR}[exit %s]${_C_RESET}\n" "$?"
+  elif [[ "$_so_result" == "Vždy Áno (táto session)" ]]; then
+    SHELL_AUTO_APPROVE="on"
+    printf "\n${_C_OK}[auto: ON]${_C_RESET} ${_C_CMD}%s${_C_RESET}\n" "$_cmd" >&2
     bash -c "$_cmd" 2>&1 || printf "${_C_ERR}[exit %s]${_C_RESET}\n" "$?"
   else
     printf '[zrušené užívateľom]'
@@ -582,15 +666,19 @@ _tool_write_file() {
   fi
   rm -f "$_tmp_wf"
 
-  printf "\n[write_file] ${_C_PATH}%s${_C_RESET}\n${_C_BOLD}Zapísať? [y/N]${_C_RESET} " "$_path" >&2
-  local _ans=""
-  if [[ -t 2 ]]; then
-    IFS= read -r _ans </dev/tty 2>/dev/null || _ans="n"
-  fi
-  if [[ "$_ans" =~ ^[Yy]$ ]]; then
+  printf "\n[write_file] ${_C_PATH}%s${_C_RESET}\n" "$_path" >&2
+  local _so_result
+  _so_result=$(_select_option "Zapísať?" "Áno" "Nie" "Áno a nezobrazovať diff nabudúce")
+  if [[ "$_so_result" == "Áno" ]]; then
     printf '%s' "$_content" > "$_path" 2>&1 \
       && printf "${_C_OK}OK: %s (%d bajtov)${_C_RESET}" "$_path" "${#_content}" \
       || printf "${_C_ERR}Error: zápis zlyhal${_C_RESET}"
+  elif [[ "$_so_result" == "Áno a nezobrazovať diff nabudúce" ]]; then
+    printf '%s' "$_content" > "$_path" 2>&1 \
+      && printf "${_C_OK}OK: %s (%d bajtov)${_C_RESET}" "$_path" "${#_content}" \
+      || printf "${_C_ERR}Error: zápis zlyhal${_C_RESET}"
+    # Set project-level flag to skip diff preview next time
+    printf '%s' "$_path" > "$HOME/.ai-os/write_no_diff" 2>/dev/null || true
   else
     printf '[zrušené užívateľom]'
   fi
@@ -622,14 +710,16 @@ _tool_git_info() {
 
 _tool_save_plan() {
   local _args="$1"
-  local _content _name _path
+  local _content _name _path _ts
   _content=$(jq -r '.content // empty' <<< "$_args")
   _name=$(jq -r '.name // "plan"' <<< "$_args")
   [[ -z "$_content" ]] && printf 'Error: content required' && return
   _name=$(printf '%s' "$_name" | tr -cd 'a-zA-Z0-9_-' | cut -c1-50)
   [[ -z "$_name" ]] && _name="plan"
   mkdir -p "$HOME/.ai-os/plans"
-  _path="$HOME/.ai-os/plans/${_name}.md"
+  # Save with timestamp for version tracking
+  _ts=$(date '+%Y%m%d_%H%M%S')
+  _path="$HOME/.ai-os/plans/${_name}-${_ts}.md"
   printf '%s\n' "$_content" > "$_path" \
     && printf '%s' "$_path" > "$HOME/.ai-os/current-plan" \
     && printf 'Plán uložený: %s' "$_path" \
@@ -650,6 +740,8 @@ _colorize_diff() {
 
 # _handle_tool_call FUNC_NAME FUNC_ARGS — dispatcher for all agent tools.
 # Prints result to stdout. Does NOT handle delegate_to_flash (run_agentic only).
+_print_response() { printf '%s\n' "$1"; }
+
 _handle_tool_call() {
   local _fn="$1" _fa="$2" _result=""
   case "$_fn" in
@@ -689,7 +781,7 @@ run_interactive_flash() {
 
     if [[ "$_finish" != "tool_calls" ]]; then
       _content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
-      printf '%s\n' "$_content"
+      _print_response "$_content"
       printf '%s' "$_content" > "$AI_TMP/last_stream.txt"
       return 0
     fi
@@ -718,7 +810,7 @@ run_interactive_flash() {
   _stop_spinner
   ask "$_msgs" false >/dev/null
   _content=$(jq -r '.choices[0].message.content // empty' < "$AI_TMP/last_output.json")
-  printf '%s\n' "$_content"
+  _print_response "$_content"
   printf '%s' "$_content" > "$AI_TMP/last_stream.txt"
 }
 
@@ -797,7 +889,7 @@ if [[ "$MODE" = "interactive" ]]; then
       while kill -0 "$_ppid" 2>/dev/null; do
         _k=""
         IFS= read -r -s -t 1 -n 1 _k || true
-        [[ "$_k" == $'\033' ]] && kill -INT "$_ppid" 2>/dev/null && break
+        [[ "$_k" == $'\033' ]] && kill -USR1 "$_ppid" 2>/dev/null && break
       done
     ) &
     _ESC_PID=$!
@@ -833,6 +925,8 @@ if [[ "$MODE" = "interactive" ]]; then
       printf ' \b' >&2  # overwrite last spinner char, cursor stays in place
     fi
   }
+
+  _print_response() { printf '%s\n' "$1" | sed "s/^/□ /"; }
 
   SHELL_AUTO_APPROVE=""  # session-scoped; reset on each interactive session
 
@@ -946,7 +1040,7 @@ if [[ "$MODE" = "interactive" ]]; then
     warp_seq C
     [[ "$INPUT" = "exit" || "$INPUT" = "quit" || -z "$INPUT" ]] && break
 
-    history -s "$INPUT"
+    history -s -- "$INPUT"
 
     # Shell passthrough — model is bypassed entirely, no tokens used
     if [[ "$INPUT" = "!"* ]]; then
@@ -1167,10 +1261,9 @@ PROJCTX
             clear)
               if [[ -f ~/.ai-os/current-project ]]; then
                 local_clr_cur=$(< ~/.ai-os/current-project)
-                printf 'Naozaj vymazať aktívny projekt "%s"? [y/N] ' "$(basename "$local_clr_cur")"
-                local_clr_ans=""
-                IFS= read -r local_clr_ans || local_clr_ans="n"
-                if [[ "$local_clr_ans" =~ ^[Yy]$ ]]; then
+                local_clr_result
+                local_clr_result=$(_select_option "Naozaj vymazať projekt \"$(basename "$local_clr_cur")\"?" "Áno" "Nie")
+                if [[ "$local_clr_result" == "Áno" ]]; then
                   rm -f ~/.ai-os/current-project
                   rm -f ~/.ai-os/current-plan
                   SYSTEM_PROMPT=$(_build_system_prompt)
@@ -1345,6 +1438,85 @@ WSDSEOF
           fi
           local_skip_api=true
           ;;
+        "/plan progress "*)
+          local_plan_prog="${INPUT#/plan progress }"
+          if [[ "$local_plan_prog" =~ ^[0-9]+$ ]] && [[ "$local_plan_prog" -ge 0 && "$local_plan_prog" -le 100 ]]; then
+            if [[ -f ~/.ai-os/current-plan ]]; then
+              local_plan_prog_path=$(< ~/.ai-os/current-plan); local_plan_prog_path="${local_plan_prog_path%$'\n'}"
+              if [[ -f "$local_plan_prog_path" ]]; then
+                # Store progress as companion .meta.json file
+                printf '{"progress":%d,"updated":"%s"}\n' "$local_plan_prog" "$(date '+%Y-%m-%d %H:%M:%S')" > "${local_plan_prog_path%.md}.meta.json"
+                printf "${_C_OK}Progress: %d%%${_C_RESET}\n" "$local_plan_prog"
+              else
+                printf 'Chyba: plán neexistuje\n' >&2
+              fi
+            else
+              printf 'Chyba: žiadny aktívny plán\n' >&2
+            fi
+          else
+            printf 'Použitie: /plan progress <0-100>\n' >&2
+          fi
+          local_skip_api=true
+          ;;
+        "/plan progress")
+          if [[ -f ~/.ai-os/current-plan ]]; then
+            local_plan_prog_path=$(< ~/.ai-os/current-plan); local_plan_prog_path="${local_plan_prog_path%$'\n'}"
+            local_plan_prog_meta="${local_plan_prog_path%.md}.meta.json"
+            if [[ -f "$local_plan_prog_meta" ]]; then
+              local_plan_prog_val=$(jq -r '.progress // "?"' "$local_plan_prog_meta")
+              local_plan_prog_date=$(jq -r '.updated // "?"' "$local_plan_prog_meta")
+              printf 'Aktívny plán: %s\nProgress: %s%%\nPosledná aktualizácia: %s\n' "$local_plan_prog_path" "$local_plan_prog_val" "$local_plan_prog_date"
+            else
+              printf 'Aktívny plán: %s\nProgress: (nezaznamenaný)\n' "$local_plan_prog_path"
+            fi
+          else
+            printf '(žiadny aktívny plán)\n'
+          fi
+          local_skip_api=true
+          ;;
+        "/plan history")
+          if [[ -d ~/.ai-os/plans ]]; then
+            printf 'Verzie plánov:\n'
+            for local_ph_f in ~/.ai-os/plans/*.md; do
+              [[ -f "$local_ph_f" ]] || continue
+              local_ph_name=$(basename "$local_ph_f" .md)
+              local_ph_size=$(wc -c < "$local_ph_f" | tr -d ' ')
+              local_ph_date=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$local_ph_f" 2>/dev/null || date -r "$local_ph_f" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "?")
+              local_ph_progress=""
+              local_ph_meta="${local_ph_f%.md}.meta.json"
+              [[ -f "$local_ph_meta" ]] && local_ph_progress=" [$(jq -r '.progress' "$local_ph_meta")%]"
+              printf '  %s  (%s B)%s\n' "$local_ph_date" "$local_ph_size" "$local_ph_progress"
+              printf '    %s\n' "$local_ph_name"
+            done
+          else
+            printf '(žiadne uložené plány)\n'
+          fi
+          local_skip_api=true
+          ;;
+        "/plan continue")
+          if [[ -f ~/.ai-os/current-plan ]]; then
+            local_plan_cont_path=$(< ~/.ai-os/current-plan); local_plan_cont_path="${local_plan_cont_path%$'\n'}"
+            if [[ -f "$local_plan_cont_path" ]]; then
+              local_plan_cont_content=$(< "$local_plan_cont_path")
+              local_plan_cont_progress=""
+              local_plan_cont_meta="${local_plan_cont_path%.md}.meta.json"
+              [[ -f "$local_plan_cont_meta" ]] && local_plan_cont_progress=" (progress: $(jq -r '.progress' "$local_plan_cont_meta")%)"
+              INPUT="Pokračuj v práci na aktívnom pláne. Tu je aktuálny stav:${local_plan_cont_progress}
+
+Plán:
+${local_plan_cont_content}
+
+Pokračuj presne tam, kde si skončil. Nezačínaj odznova."
+              local_skip_api=false
+            else
+              printf 'Chyba: plán neexistuje\n' >&2
+              local_skip_api=true
+            fi
+          else
+            printf 'Chyba: žiadny aktívny plán\n' >&2
+            local_skip_api=true
+          fi
+          ;;
         /plan)
           # Multiline mode: collect lines until lone '.'
           printf 'Plánovací mód (ukonči riadkom obsahujúcim len .)\n'
@@ -1455,6 +1627,9 @@ WSDSEOF
           printf '/plan load <p>   načíta existujúci plán ako aktívny kontext\n'
           printf '/plan clear      zruší aktívny plán\n'
           printf '/plan show       zobrazí aktívny plán\n'
+          printf '/plan progress [%%]  zobrazí/nastaví percento dokončenia plánu\n'
+          printf '/plan history    zobrazí históriu verzií plánov\n'
+          printf '/plan continue   pokračuje v aktívnom pláne (vloží ho do promptu)\n'
           printf '/batch <súbor>   spustí prompty zo súboru sekvenčne\n'
           printf '/save [meno]     uloží konverzáciu do named session\n'
           printf '/load [meno]     načíta named session\n'
@@ -1490,10 +1665,11 @@ WSDSEOF
     local_rtctx=$(_runtime_context)
     local_user_msg="$(printf '%s\n\n%s' "$local_rtctx" "$INPUT")"
     CONV=$(jq -n --argjson h "$CONV" --arg c "$local_user_msg" '$h + [{"role":"user","content":$c}]')
-    printf '\nai: '
+    printf '\n'
 
     _AI_INTERRUPTED=0
     trap '_AI_INTERRUPTED=1' INT
+    trap '_AI_INTERRUPTED=1' USR1
     _start_esc_monitor
 
     _ask_ok=0
@@ -1504,6 +1680,7 @@ WSDSEOF
     fi
 
     _stop_esc_monitor
+    trap '' USR1
     trap 'true' INT  # restore — readline needs non-SIG_IGN before next read -er
 
     if [[ "$_AI_INTERRUPTED" -eq 1 && "$_ask_ok" -eq 0 ]]; then

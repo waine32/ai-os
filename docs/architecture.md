@@ -72,21 +72,43 @@ while read INPUT:
 Tool-call loop (max 5 delegácií + 10 iterácií):
 ```
 loop:
+  _start_spinner
   ask(messages, stream=false, PRO_TOOLS)
+  _stop_spinner
   finish_reason == "tool_calls"?
     delegate_to_flash → ask(flash_messages, stream=true)
     run_shell         → _exec_shell_tool → Y/N → bash -c
+    save_plan         → _tool_save_plan → zápis + current-plan pointer
   else:
-    printf final_content; return
+    _print_response final_content; return
 ```
 
 ### `run_interactive_flash(messages)` — flash v interaktívnom móde
 Rovnaká štruktúra ako `run_agentic`, ale:
-- Používa len `SHELL_TOOL` (nie `delegate_to_flash`)
+- Používa len `FLASH_INTERACTIVE_TOOLS` (nie `delegate_to_flash`)
 - Blocking mode (nie streaming) — trade-off za tool support
+- Výstup cez `_print_response` (pridáva `□` prefix v interactive mode)
 
 ### `_exec_shell_tool(cmd, reason)`
-Zobrazí príkaz, vypýta `[y/N]` zo stdin, spustí cez `bash -c`. Default = N (bezpečný default).
+Zobrazí príkaz farebne, vypýta `[y/N]` z `/dev/tty` (ak je stderr TTY), spustí cez `bash -c`. Default = N (bezpečný default).
+
+### `_tool_write_file(args)` — s diff viewerom
+Pred [y/N] promptom zobrazí:
+- existujúci súbor: `diff -u` (max 80 riadkov) sfarbený cez `_colorize_diff()`
+- nový súbor: `(nový súbor — N B)`
+Potvrdenie cez `/dev/tty` s TTY guardom (`[[ -t 2 ]]`).
+
+### `_tool_save_plan(args)` — pre-approved
+Zapíše `content` do `~/.ai-os/plans/<name>.md`, aktualizuje `~/.ai-os/current-plan` pointer. Automaticky načítaný do `_runtime_context()` pri ďalšej správe.
+
+### `_print_response(content)`
+Stub (passthrough) v stateless/session móde. V interactive móde: `printf '%s\n' "$content" | sed "s/^/□ /"`. Prefixuje každý riadok bielym štvorčekom.
+
+### `_colorize_diff()`
+Pipeline filter: riadky `+` → zelené pozadie, `-` → červené pozadie, `@@` → cyan, `+++`/`---` → dim. Stub mimo interactive módu (no-op).
+
+### Spinner helpers
+`_start_spinner()` / `_stop_spinner()` — animovaný `|/-\` na stderr počas `ask()`. Stubs mimo interactive módu. `disown` po štarte zabraňuje "Terminated: 15" notifikáciám pri kill.
 
 ---
 
@@ -96,10 +118,11 @@ Zobrazí príkaz, vypýta `[y/N]` zo stdin, spustí cez `bash -c`. Default = N (
 |---|---|---|
 | Model | pro | flash |
 | Mód | stateless + interactive | interactive only |
-| Tools | `delegate_to_flash` + `run_shell` | `run_shell` |
-| Output | blocking, print na konci | blocking, print na konci |
+| Tools | `delegate_to_flash` + všetky | všetky okrem `delegate_to_flash` |
+| Output | `_print_response` (□ v interactive) | `_print_response` (□ vždy) |
+| Spinner | `_start_spinner` okolo každého `ask()` | `_start_spinner` okolo každého `ask()` |
 
-Flash v stateless/session móde volá `ask(stream=true)` priamo — bez tool loopu.
+Flash v stateless/session móde volá `ask(stream=true)` priamo — bez tool loopu, bez `□` prefixu.
 
 ---
 
@@ -114,6 +137,8 @@ Flash v stateless/session móde volá `ask(stream=true)` priamo — bez tool loo
 | `/batch` | len súbory v `$HOME` |
 | `run_shell` | potvrdenie Y/N pred každým príkazom |
 | `current-project` | musí byť v `$HOME` |
+| `save_plan` meno | sanitizácia na `[a-zA-Z0-9_-]`, max 50 znakov |
+| confirmácie v tooloch | `/dev/tty` s `[[ -t 2 ]]` guardom — default `n` v pipe/test kontexte |
 
 ---
 
@@ -126,6 +151,9 @@ Flash v stateless/session móde volá `ask(stream=true)` priamo — bez tool loo
 ├── context.md               # globálny aktívny kontext
 ├── workspace                # cesta k workspace (jeden riadok)
 ├── current-project          # cesta k aktívnemu projektu (jeden riadok)
+├── current-plan             # cesta k aktívnemu plánu (jeden riadok)
+├── plans/
+│   └── <name>.md            # plány uložené modelom (save_plan) alebo /plan save
 ├── sessions/
 │   ├── history.json         # session história (JSON array)
 │   ├── interactive_history  # readline história

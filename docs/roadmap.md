@@ -18,17 +18,20 @@
 | Warp OSC 133 | Shell integration pre Warp terminal |
 | Named sessions | `/save [name]` / `/load [name]` |
 | `/batch` | Sekvenčné spúšťanie promptov zo súboru |
+| `/memory add` / `/memory edit` | Rýchly zápis + editor pre všetky kontext vrstvy |
+| Thinking indicator | Spinner (`\|/-\`) počas každého `ask()` volania; reštartuje po Y/N odmietnutí |
+| Diff viewer | `write_file` zobrazí `diff -u` pred potvrdením; nový súbor → byte count |
+| Farby + `NO_COLOR` | ANSI UI farby s TTY guardom; vypnuté pri `NO_COLOR` env var |
+| `□` prefix | Každý riadok výstupu modelu prefixovaný bielym štvorčekom v interactive móde |
+| `save_plan` tool | Model uloží plán do `~/.ai-os/plans/`; survives session restart |
+| `/plan save/load/clear/show` | Manuálna správa aktívneho plánu |
+| `read_file` / `grep_search` / `git_info` tools | Rozšírený tool layer pre flash interactive aj pro |
 
 ---
 
 ## Plánované
 
 ### Krátkodobé
-- **`/memory add <text>`** — rýchly append do `~/.ai-os/memory.md` bez otvárania editora
-- **`/memory edit [kľúč]`** — otvoriť konkrétny súbor v `$EDITOR`; kľúče: `instructions`, `memory`, `context`, `ws`, `proj`
-- **`/memory` rozšírenie** — zobraziť všetky vrstvy (global + workspace + projekt), nie len globálne
-
-### Strednodobé
 - **`/history`** — prezeranie a vyhľadávanie v session histórii (`~/.ai-os/sessions/history.json`)
 - **Perzistentná história pre pro** — interaktívny pro mód momentálne neukladá históriu medzi sessionmi
 - **Multi-model fallback** — ak primárny provider zlyhá, automaticky skúsiť záložný

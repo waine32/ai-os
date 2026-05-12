@@ -134,11 +134,14 @@ Flash v stateless/session móde volá `ask(stream=true)` priamo — bez tool loo
 | API key | `--config <(printf ...)` — nie v `ps aux` argv |
 | Dočasné súbory | `~/.ai-os/tmp/` — nie `/tmp` (symlink attack) |
 | `/save`/`/load` | sanitizácia na `[a-zA-Z0-9_-]` |
-| `/batch` | len súbory v `$HOME` |
-| `run_shell` | potvrdenie Y/N pred každým príkazom |
+| `/batch` | len súbory v `$HOME`; `realpath` (nie `-m`) pre symlink resolution |
+| `run_shell` | potvrdenie cez `_select_option` (Áno/Nie/Vždy Áno) |
 | `current-project` | musí byť v `$HOME` |
 | `save_plan` meno | sanitizácia na `[a-zA-Z0-9_-]`, max 50 znakov |
-| confirmácie v tooloch | `/dev/tty` s `[[ -t 2 ]]` guardom — default `n` v pipe/test kontexte |
+| confirmácie v tooloch | `_select_option` s arrow keys; fallback v non-TTY = posledná možnosť (Nie) |
+| `grep_search` options | sanitizácia — povolené len `-i -l -w -r -n -I --exclude-dir= --include=` |
+| `_select_option` fallback | non-TTY vracia poslednú možnosť (bezpečný default) |
+| `write_file` diff | možnosť "Áno a nezobrazovať diff nabudúce" |
 
 ---
 

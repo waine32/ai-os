@@ -181,3 +181,33 @@ Zdokumentované rozhodnutia s alternatívami a dôvodmi. Slúži ako referencia 
 **Alternatívy:** Viacero riadkov `[pro...]`, žiadny indikátor
 
 **Dôvod:** Viacero riadkov `[pro...]` (jeden pre každú delegáciu) vytváralo zbytočný vizuálny šum. Single line s vymazaním je čistejšie — používateľ vidí len spinner a tool výstupy.
+
+---
+
+## `_select_option` fallback vracia poslednú možnosť (Nie) v non-TTY
+
+**Rozhodnutie:** Keď `_select_option` nie je TTY, vracia `"${_so_options[-1]}"` (poslednú možnosť) namiesto prvej.
+
+**Alternatívy:** Prvá možnosť (Áno), pýtať sa cez `/dev/tty`, vrátiť prázdny string
+
+**Dôvod:** V testoch a pipe kontexte nie je terminál. Prvá možnosť je typicky "Áno" — vracanie "Áno" by automaticky potvrdzovalo všetky operácie, čo je nebezpečné. Posledná možnosť je typicky "Nie" alebo najbezpečnejšia alternatíva. Toto je konzervatívny default: radšej zlyhať ako nechtiac povoliť.
+
+---
+
+## `grep_search` options sanitizácia
+
+**Rozhodnutie:** `_tool_grep_search` povoľuje len bezpečnú podmnožinu grep flagov: `-i -l -w -r -n -I --exclude-dir= --include=`.
+
+**Alternatívy:** Povoliť všetky flagy, nepovoliť žiadne
+
+**Dôvod:** `grep_search` je pre-approved tool (model ho volá bez potvrdenia). Bez sanitizácie by model mohol vložiť `--include=` alebo `--exclude-dir=` flagy na manipuláciu výsledkov. Úplný zákaz flagov by obmedzoval legitímne použitie (case-insensitive search, file type filtering). Sanitizácia je kompromis: model má flexibilitu, ale nemôže injectovať nebezpečné flagy.
+
+---
+
+## `realpath` (bez `-m`) pre `/batch` path check
+
+**Rozhodnutie:** `/batch` používa `realpath` (bez `-m`) namiesto `realpath -m`.
+
+**Alternatívy:** `realpath -m`, `readlink -f`, žiadna normalizácia
+
+**Dôvod:** `realpath -m` nerieši symbolické linky — ak má user `~/link -> /etc`, `realpath -m ~/link/shadow` vráti `~/link/shadow`, čo prejde `$HOME` checkom, ale shell pri čítaní nasleduje symlink do `/etc/shadow`. `realpath` (bez `-m`) resolvuje symlinky, takže `realpath ~/link/shadow` vráti `/etc/shadow`, čo je mimo `$HOME` a bude odmietnuté.

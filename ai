@@ -540,9 +540,9 @@ _select_option() {
     case "$_so_key" in
       $'\e')
         # Arrow key sequence: ESC [ A/B/C/D
-        IFS= read -r -s -n 1 -t 0.05 _so_key </dev/tty 2>/dev/null || continue
+        IFS= read -r -s -n 1 -t 1 _so_key </dev/tty 2>/dev/null || continue
         if [[ "$_so_key" == '[' ]]; then
-          IFS= read -r -s -n 1 -t 0.05 _so_key </dev/tty 2>/dev/null || continue
+          IFS= read -r -s -n 1 -t 1 _so_key </dev/tty 2>/dev/null || continue
           case "$_so_key" in
             'C'|'B')  # Right or Down → next option
               _so_selected=$(( (_so_selected + 1) % ${#_so_options[@]} ))
@@ -613,7 +613,7 @@ _exec_shell_tool() {
     && printf "\n[shell] ${_C_CMD}%s${_C_RESET}  # %s\n" "$_cmd" "$_reason" >&2 \
     || printf "\n[shell] ${_C_CMD}%s${_C_RESET}\n" "$_cmd" >&2
   local _so_result
-  _so_result=$(_select_option "Spustiť?" "Áno" "Nie" "Vždy Áno (táto session)")
+  _so_result=$(_select_option "Spustiť?" "Áno" "Vždy Áno (táto session)" "Nie")
   if [[ "$_so_result" == "Áno" ]]; then
     bash -c "$_cmd" 2>&1 || printf "${_C_ERR}[exit %s]${_C_RESET}\n" "$?"
   elif [[ "$_so_result" == "Vždy Áno (táto session)" ]]; then
@@ -668,7 +668,7 @@ _tool_write_file() {
 
   printf "\n[write_file] ${_C_PATH}%s${_C_RESET}\n" "$_path" >&2
   local _so_result
-  _so_result=$(_select_option "Zapísať?" "Áno" "Nie" "Áno a nezobrazovať diff nabudúce")
+  _so_result=$(_select_option "Zapísať?" "Áno" "Áno a nezobrazovať diff nabudúce" "Nie")
   if [[ "$_so_result" == "Áno" ]]; then
     printf '%s' "$_content" > "$_path" 2>&1 \
       && printf "${_C_OK}OK: %s (%d bajtov)${_C_RESET}" "$_path" "${#_content}" \
